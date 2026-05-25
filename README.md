@@ -39,8 +39,8 @@ Tahap ini krusial untuk mengubah data mentah berbentuk *Edgelist* menjadi strukt
 Data awal berupa file CSV (`edgelist_Aw_Cosine_10000.csv`) yang berisi koneksi antar-produk dan nilai kemiripannya (*Cosine Similarity*).
 | Product_A | Product_B | Weight |
 | :---: | :---: | :---: |
-| 1045 | 1045 | 1.0 |
 | 1045 | 890 | 0.45 |
+| 1045 | 1045 | 1.0 |
 
 **2. Membuka File Stream (`ifstream`)**
 ```cpp
@@ -63,3 +63,206 @@ int N = 0;
     *   *Contoh*: ID `1045` diterjemahkan menjadi indeks `0`.
 *   **`reverse_map` (Kamus Mundur)**: Menyimpan urutan ID asli. Ini sangat penting untuk **Tahap 4 (Ekspor)** agar komputer bisa menerjemahkan kembali indeks `0` menjadi ID `1045` saat dicetak ke CSV hasil.
 *   **Variabel `N`**: Bertindak sebagai penghitung jumlah produk unik yang ditemukan.
+
+**4. Parsing dan Pengekstrakan Baris**
+```cpp
+while (getline(file, line)) {
+    stringstream ss(line);
+    getline(ss, str_A, ','); getline(ss, str_B, ','); getline(ss, str_W, ',');
+    // ...
+```
+Program membaca file baris demi baris menggunakan looping `while`. Fitur `stringstream` dibantu dengan pemisah koma (`,`) digunakan untuk memotong satu teks utuh menjadi potongan-potongan data.
+
+**Simulasi Visualisasi Ekstraksi 1 Baris Data:**
+
+Bayangkan komputer sedang membaca baris data CSV Anda. Teks utuh tersebut ditangkap oleh variabel `line`. Mesin `stringstream` kemudian memindai teks tersebut dari kiri ke kanan dan memotongnya setiap kali bertemu tanda koma (`,`).
+| Teks Mentah (`line`) | Proses Pemotongan | Variabel Tujuan | Hasil Akhir (String) |
+| :--- | :--- | :--- | :--- |
+| `"1045,890,0.45"` | ➔ Potongan Pertama | `str_A` | `"1045"` |
+| | ➔ Potongan Kedua | `str_B` | `"890"` |
+| | ➔ Potongan Ketiga | `str_W` | `"0.45"` |
+
+**5. Konversi dan Penyimpanan ke Array (`temp_edges`)**
+
+```cpp
+    int id_a = stoi(str_A);
+    int id_b = stoi(str_B);
+    float w = parse_weight(str_W);
+
+    if (map_index.find(id_a) == map_index.end()) { map_index[id_a] = N++; reverse_map.push_back(id_a); }
+    if (map_index.find(id_b) == map_index.end()) { map_index[id_b] = N++; reverse_map.push_back(id_b); }
+
+    temp_edges.push_back({map_index[id_a], map_index[id_b], w});
+}
+```
+
+Setelah teks terpotong menjadi tiga variabel string, program wajib mengubah wujud teks tersebut menjadi angka matematis murni. Selanjutnya, program melakukan pemetaan (*Mapping*) agar ID Produk yang angkanya acak atau sangat besar bisa dirapatkan menjadi urutan indeks matriks yang rapi (selalu dimulai dari 0).
+
+**Simulasi Visualisasi Proses Pemetaan (Data Baris Pertama: "1045", "890", "0.45"):**
+Anggaplah ini adalah baris data pertama yang diproses oleh program, sehingga memori indeks awal masih bernilai nol (`N = 0`). Berikut adalah urutan kejadian di dalam memori komputer:
+
+| Tahap Proses | Variabel / Perintah | Nilai / Hasil Memori | Penjelasan Logika |
+| :--- | :--- | :--- | :--- |
+| **1. Konversi Tipe Data** | `id_a` (Integer) | `1045` | Teks `"1045"` diubah menggunakan `stoi` menjadi bilangan bulat. |
+| | `id_b` (Integer) | `890` | Teks `"890"` diubah menjadi bilangan bulat. |
+| | `w` (Float) | `0.45` | Teks `"0.45"` diubah menggunakan `parse_weight` menjadi desimal. |
+| **2. Pendaftaran ID A** | `map_index[1045]` | `0` | Komputer mengecek kamus. Karena ID 1045 belum ada, ia didaftarkan sebagai **Indeks 0**. Nilai `N` bertambah menjadi 1. |
+| | `reverse_map` | `[1045]` | Komputer mengingat bahwa Indeks 0 adalah milik ID 1045 untuk diekspor nanti. |
+| **3. Pendaftaran ID B** | `map_index[890]` | `1` | ID 890 belum ada di kamus, maka ia didaftarkan sebagai **Indeks 1**. Nilai `N` bertambah menjadi 2. |
+| | `reverse_map` | `[1045, 890]` | Komputer mengingat bahwa Indeks 1 adalah milik ID 890. |
+| **4. Masuk ke Keranjang** | `temp_edges.push_back` | `{0, 1, 0.45}` | Baris data sukses masuk ke dalam array penampungan sementara menggunakan wujud indeks matriksnya, bukan ID aslinya. |
+
+Berkat proses pemetaan ini, komputer GPU terbebas dari keharusan membuat matriks raksasa kosong hanya untuk menyesuaikan dengan ID produk yang melompat-lompat. Matriks dipastikan selalu rapat dan padat, mulai dari indeks `0` sampai jumlah produk unik terakhir.
+
+**6. Pengurutan Data (Sorting) dan Pembentukan Format CSC**
+
+```cpp
+    // Urutkan edge untuk format CSR/CSC
+    sort(temp_edges.begin(), temp_edges.end(), [](const Edge& a, const Edge& b) {
+        if (a.c != b.c) return a.c < b.c;
+        return a.r < b.r;
+    });
+
+    vector<int> h_col_ptr(N + 1, 0);
+    vector<int> h_row_idx;
+    vector<float> h_val;
+
+    for (const auto& e : temp_edges) {
+        h_col_ptr[e.c + 1]++;
+        h_row_idx.push_back(e.r);
+        h_val.push_back(e.w);
+    }
+    for (int i = 0; i < N; ++i) h_col_ptr[i + 1] += h_col_ptr[i];
+
+    int nnz = h_col_ptr[N];
+    cout << "Data terbaca. N = " << N << " Produk | Non-Zero (Koneksi) = " << nnz << endl;
+```
+
+Setelah seluruh data masuk ke dalam keranjang `temp_edges`, data tersebut masih acak. GPU dan pustaka NVIDIA cuSPARSE mewajibkan struktur data yang sangat disiplin. Tahap ini bertugas mengurutkan dan menyusun data ke dalam format memori **Compressed Sparse Column (CSC)**.
+
+**Langkah-langkah Proses Pembentukan CSC:**
+
+1. **Pengurutan Ketat (Sorting):** Fungsi `sort` dibekali aturan khusus (*lambda function*). Aturan pertama: urutkan data berdasarkan **Kolom** (`c`) dari terkecil ke terbesar. Aturan kedua: jika ada data di kolom yang sama, urutkan berdasarkan **Baris** (`r`).
+2. **Pembuatan 3 Array CSC:** Program menyiapkan memori kosong di CPU (RAM) untuk tiga pilar utama format Sparse:
+   * `h_col_ptr`: Peta penunjuk batas kolom (ukurannya `N + 1`, diisi `0` semua di awal).
+   * `h_row_idx`: Daftar indeks baris (dinamis).
+   * `h_val`: Daftar bobot/probabilitas koneksi (dinamis).
+3. **Pencatatan Data & Histogram:** *Looping* pertama mengambil data satu per satu. Indeks baris (`e.r`) dan bobot (`e.w`) langsung didorong masuk ke vektornya masing-masing. Bersamaan dengan itu, program menghitung jumlah koneksi per kolom (`h_col_ptr[e.c + 1]++`).
+4. **Penjumlahan Beruntun (Prefix Sum):** *Looping* kedua bertugas mengubah "jumlah koneksi" di `h_col_ptr` menjadi "titik koordinat memori" melalui penjumlahan kumulatif.
+5. **Ekstraksi Total Koneksi:** Kotak memori paling ujung dari hasil *Prefix Sum* secara otomatis berisi total keseluruhan koneksi yang valid (*Number of Non-Zeros* atau NNZ).
+
+---
+
+**Simulasi Visualisasi 1: Pencatatan Data ke 3 Array (Histogram)**
+Anggaplah kita memiliki 3 produk (N = 3) dan data `temp_edges` kita yang sudah diurutkan berisi 3 koneksi: 
+1. `c = 0`, `r = 1`, `w = 0.5`
+2. `c = 0`, `r = 2`, `w = 0.9`
+3. `c = 1`, `r = 0`, `w = 0.4`
+
+Berikut adalah proses pengisian data ke dalam memori saat *looping* pertama berjalan:
+
+| Tahap Iterasi | Data yang Dibaca (`e`) | `h_col_ptr` (Jumlah per Kolom) | `h_row_idx` (Daftar Baris) | `h_val` (Daftar Bobot) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Kondisi Awal** | - | `[0, 0, 0, 0]` | `[]` | `[]` |
+| **Putaran 1** | Kolom `0`, Baris `1`, Bobot `0.5` | `[0, 1, 0, 0]` *(Indeks ke-1 bertambah)* | `[1]` | `[0.5]` |
+| **Putaran 2** | Kolom `0`, Baris `2`, Bobot `0.9` | `[0, 2, 0, 0]` *(Indeks ke-1 bertambah)* | `[1, 2]` | `[0.5, 0.9]` |
+| **Putaran 3** | Kolom `1`, Baris `0`, Bobot `0.4` | `[0, 2, 1, 0]` *(Indeks ke-2 bertambah)* | `[1, 2, 0]` | `[0.5, 0.9, 0.4]` |
+
+---
+
+**Simulasi Visualisasi 2: Perubahan `h_col_ptr` (Prefix Sum)**
+Array `h_row_idx` dan `h_val` sudah selesai diisi. Kini, program mengeksekusi *looping* kedua untuk menjumlahkan `h_col_ptr` secara beruntun agar nilainya berubah menjadi titik koordinat memori.
+
+| Tahap Eksekusi | Isi Array `h_col_ptr` | Penjelasan |
+| :--- | :--- | :--- |
+| **Selesai Histogram** | `[0, 2, 1, 0]` | Kolom 0 ada 2 data, Kolom 1 ada 1 data, Kolom 2 kosong. |
+| **Prefix Sum (i = 0)** | `[0, 2, 1, 0]` | Kotak ke-1 dijumlahkan dengan Kotak ke-0 (2 + 0 = 2). |
+| **Prefix Sum (i = 1)** | `[0, 2, 3, 0]` | Kotak ke-2 dijumlahkan dengan Kotak ke-1 (1 + 2 = 3). |
+| **Prefix Sum (i = 2)** | `[0, 2, 3, 3]` | Kotak ke-3 dijumlahkan dengan Kotak ke-2 (0 + 3 = 3). |
+
+---
+
+
+
+**Hasil Akhir Format CSC:**
+Dari serangkaian proses simulasi di atas, wujud akhir format matriks CSC yang tercipta dan siap dikirim untuk diproses oleh GPU NVIDIA adalah sebagai berikut:
+* `h_col_ptr` = **`{0, 2, 3, 3}`**
+* `h_row_idx` = **`{1, 2, 0}`**
+* `h_val`     = **`{0.5, 0.9, 0.4}`**
+
+*(Dari kotak memori paling ujung `h_col_ptr[3]`, secara otomatis didapatkan total **NNZ = 3** koneksi).*
+
+### TAHAP 2: Alokasi Memori GPU dan Persiapan Pasukan Komputasi (CUDA)
+
+Setelah matriks CSC terbentuk rapi di memori utama komputer (RAM/Host), tahap selanjutnya adalah memindahkan data tersebut ke kartu grafis (VRAM/Device) dan menyiapkan parameter eksekusi paralel.
+
+```cpp
+    // --- TAHAP 2: ALOKASI MEMORI GPU ---
+    int *d_col_ptr, *d_row_idx, *d_nnz_per_col;
+    float *d_val, *d_chaos;
+
+    CHECK_CUDA(cudaMalloc(&d_col_ptr, (N + 1) * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_row_idx, nnz * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_val, nnz * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_nnz_per_col, N * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_chaos, N * sizeof(float)));
+```
+
+**1. Pemesanan Kavling Memori GPU (`cudaMalloc`)**
+Di dunia CUDA, terdapat konvensi penamaan standar: awalan `h_` untuk variabel di CPU (*Host*) dan awalan `d_` untuk variabel di GPU (*Device*). 
+Fungsi `cudaMalloc` bertugas mengalokasikan ruang fisik di memori VRAM GPU secara presisi:
+* `d_col_ptr`: Diberi ruang sebesar `N + 1` kotak bertipe *integer* (4 byte).
+* `d_row_idx` dan `d_val`: Diberi ruang sebesar `nnz` (total jumlah koneksi valid).
+* `d_nnz_per_col` dan `d_chaos`: Disiapkan sebagai memori kosong untuk menampung laporan hasil *pruning* dan nilai konvergensi pada Tahap 3 nanti.
+
+```cpp
+    CHECK_CUDA(cudaMemcpy(d_col_ptr, h_col_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_row_idx, h_row_idx.data(), nnz * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_val, h_val.data(), nnz * sizeof(float), cudaMemcpyHostToDevice));
+```
+
+**2. Transfer Data Lintas Perangkat (`cudaMemcpy`)**
+Ini adalah momen krusial saat array CSC melintasi perangkat keras komputer. Perintah `cudaMemcpyHostToDevice` secara eksplisit menyuruh CPU untuk menyalin isi dari `h_col_ptr`, `h_row_idx`, dan `h_val` menuju alamat memori `d_` yang sudah dipesan di GPU sebelumnya.
+
+```cpp
+    // Setup cuSPARSE
+    cusparseHandle_t handle;
+    CHECK_CUSPARSE(cusparseCreate(&handle));
+```
+
+**3. Inisialisasi Pustaka cuSPARSE**
+Karena algoritma ini memanfaatkan fungsi bawaan dari NVIDIA untuk perkalian matriks tingkat lanjut, kita wajib membuat sebuah *Handle*. `cusparseHandle_t` dapat diibaratkan sebagai "Sesi Sinyal Utama" yang akan selalu dipanggil setiap kali kita menyuruh GPU melakukan operasi matriks *Sparse*.
+
+```cpp
+    int threads1D = 256;
+    int blocks1D = (N + threads1D - 1) / threads1D;
+```
+
+**4. Formasi Pasukan Pekerja GPU (Threads & Blocks)**
+GPU beroperasi dengan membagi pekerjaan kepada ribuan pekerja (Thread) yang dikelompokkan ke dalam regu (Block). 
+* **`threads1D = 256`**: Setiap 1 regu diatur agar berisi tepat 256 pekerja.
+* **Rumus Pembulatan `blocks1D`**: Agar seluruh produk ($N$) mendapat kebagian pekerja, digunakan rumus `(N + 256 - 1) / 256`. Jika total produk misalnya 10.000, maka akan dibentuk 40 regu kerja (total 10.240 pekerja). Kelebihan 240 pekerja nantinya akan diam / tidak memproses apa-apa.
+
+```cpp
+    // Normalisasi Awal
+    initial_normalize_kernel<<<blocks1D, threads1D>>>(N, d_col_ptr, d_val);
+    CHECK_CUDA(cudaDeviceSynchronize());
+```
+
+**5. Eksekusi Paralel (Kernel Launch)**
+Tanda `<<< ... >>>` adalah aba-aba yang menyuruh ribuan pekerja GPU (sesuai formasi `blocks1D` dan `threads1D`) untuk menyerbu fungsi `initial_normalize_kernel` secara serentak. 
+Di dalam fungsi ini, setiap pekerja memegang tepat 1 Kolom Produk. Mereka bertugas menjumlahkan total bobot (*weight*) di kolom tersebut, lalu membagi setiap nilai dengan totalnya. Hasilnya, matriks berubah wujud menjadi **Matriks Markov (Matriks Stokastik)** di mana jumlah setiap kolom pasti sama dengan 1.0. 
+Perintah `cudaDeviceSynchronize()` memastikan CPU diam menunggu sampai seluruh pekerja GPU selesai menormalisasi data.
+
+```cpp
+    vector<float> h_chaos(N, 0.0f);
+    vector<int> h_nnz_per_col(N, 0);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start); cudaEventCreate(&stop);
+    cudaEventRecord(start);
+```
+
+**6. Wadah Laporan & Stopwatch Internal GPU**
+* Vektor `h_chaos` dan `h_nnz_per_col` disiapkan di RAM sebagai keranjang kosong penerima laporan dari GPU di setiap akhir iterasi.
+* `cudaEvent_t` digunakan karena fungsi waktu bawaan CPU (seperti `time.h`) tidak akurat untuk mengukur kecepatan GPU. Perintah `cudaEventRecord(start)` ditekan tepat 1 milidetik sebelum Tahap 3 (Iterasi MCL) dimulai, untuk mengukur kecepatan konvergensi secara absolut.
