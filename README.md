@@ -59,3 +59,7 @@ unordered_map<int, int> map_index;
 vector<int> reverse_map;
 int N = 0;
 ```
+*   **`map_index` (Kamus Maju)**: Bertugas menerjemahkan ID asli menjadi indeks matriks.
+    *   *Contoh*: ID `1045` diterjemahkan menjadi indeks `0`.
+*   **`reverse_map` (Kamus Mundur)**: Menyimpan urutan ID asli. Ini sangat penting untuk **Tahap 4 (Ekspor)** agar komputer bisa menerjemahkan kembali indeks `0` menjadi ID `1045` saat dicetak ke CSV hasil.
+*   **Variabel `N`**: Bertindak sebagai penghitung jumlah produk unik yang ditemukan.
