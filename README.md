@@ -23,15 +23,30 @@ Untuk matriks di atas, program tidak menyimpan angka `0.0`. Memori direpresentas
 
 ## Alur Kerja Program (Penjelasan Baris Kode)
 
-### TAHAP 1: Pembacaan Data dan Konversi CSC
-Tahap ini berjalan di CPU untuk membaca file CSV dan mengubah *Edgelist* menjadi format matriks *Sparse*.
+### TAHAP 0: Pendeklarasian Parameter MCL
+Sebelum algoritma berjalan, program menetapkan empat parameter utama yang mengontrol perilaku *Markov Clustering*:
+* **`inflation_p` (1.3f):** Tingkat inflasi (pangkat) untuk mempertegas probabilitas. Nilai 1.3 dipilih untuk menjaga keseimbangan antara memperkuat klaster fungsional dan mencegah hilangnya produk akibat inflasi yang terlalu ekstrem (*over-inflation*).
+* **`prune_threshold` (1e-3f):** Batas pemotongan (*pruning*). Nilai probabilitas di bawah 0.001 akan dianggap sebagai *noise* dan diubah menjadi 0.0 untuk menghemat memori GPU.
+* **`convergence_threshold` (1e-5f):** Batas toleransi kestabilan. Jika *Global Chaos* (selisih perubahan nilai antar iterasi) sudah di bawah 0.00001, graf dianggap sudah stabil (konvergen).
+* **`max_iterations` (1000):** Batas aman pengulangan maksimal untuk mencegah *looping* tanpa batas.
 
-* **Pembacaan CSV (`ifstream`):** Program membuka file *edgelist*, membuang baris judul kolom (*header*), lalu membaca id produk A, id produk B, dan nilai bobot (*weight*). Data ini dimasukkan ke dalam struktur `temp_edges`.
-* **Pengurutan Data (`sort`):**
-  Fungsi lambda digunakan untuk mengurutkan `temp_edges` secara ketat. Aturan prioritas pertama adalah mengurutkan berdasarkan **Kolom** dari kecil ke besar. Jika kolomnya sama, diurutkan berdasarkan **Baris**. Pengurutan ini adalah syarat mutlak dari NVIDIA agar format CSC terbentuk sempurna.
-* **Pembentukan Array CSC (Histogram & Prefix Sum):**
-  Program melakukan *looping* untuk memisahkan baris (`h_row_idx`) dan bobot (`h_val`). Secara bersamaan, program menghitung jumlah koneksi per kolom ke dalam `h_col_ptr`. Setelah dihitung, dilakukan penjumlahan beruntun (*Prefix Sum*) pada `h_col_ptr` agar angka-angka tersebut berubah fungsi menjadi **titik koordinat memori** bagi GPU.
-* **Perhitungan NNZ:** Total koneksi (*Number of Non-Zeros*) secara otomatis didapatkan dari indeks paling ujung array *Prefix Sum* (`h_col_ptr[N]`).
+---
+
+### TAHAP 1: Pembacaan Dataset dan Pemetaan Indeks (Data Preprocessing)
+Tahap ini krusial untuk mengubah data mentah berbentuk *Edgelist* menjadi struktur data berurutan yang siap diproses oleh matriks.
+
+**1. Format Edgelist Input**
+Data awal berupa file CSV (`edgelist_Aw_Cosine_10000.csv`) yang berisi koneksi antar-produk dan nilai kemiripannya (*Cosine Similarity*).
+| Product_A | Product_B | Weight |
+| :---: | :---: | :---: |
+| 1045 | 1045 | 1.0 |
+| 1045 | 890 | 0.45 |
+
+**2. Membuka File Stream (`ifstream`)**
+```cpp
+string file_name = "edgelist_Aw_Cosine_10000.csv";
+ifstream file(file_name);
+if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
 
 ### TAHAP 2: Alokasi Memori GPU dan Persiapan
 Tahap ini adalah proses pemindahan data dari RAM Komputer ke VRAM GPU.
