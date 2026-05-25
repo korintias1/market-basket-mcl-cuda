@@ -49,4 +49,4 @@ ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
 ```
 
-Program menggunakan ifstream untuk membuka jalur komunikasi ke file CSV. Kode getline(file, line) pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
+Program menggunakan (`ifstream`) untuk membuka jalur komunikasi ke file CSV. Kode (`getline(file, line)`) pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
