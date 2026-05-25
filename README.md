@@ -47,5 +47,3 @@ Data awal berupa file CSV (`edgelist_Aw_Cosine_10000.csv`) yang berisi koneksi a
 string file_name = "edgelist_Aw_Cosine_10000.csv";
 ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
-
-```cpp
