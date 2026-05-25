@@ -48,13 +48,4 @@ string file_name = "edgelist_Aw_Cosine_10000.csv";
 ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
 
-### TAHAP 2: Alokasi Memori GPU dan Persiapan
-Tahap ini adalah proses pemindahan data dari RAM Komputer ke VRAM GPU.
-
-* **Alokasi Kavling GPU (`cudaMalloc`):** Memesan ruang fisik di dalam VRAM sesuai ukuran array yang telah dihitung di Tahap 1. Tipe data `int` dan `float` dialokasikan memori byte-nya secara presisi.
-* **Transfer Data (`cudaMemcpy`):** Mengirim array `h_col_ptr`, `h_row_idx`, dan `h_val` melintasi *motherboard* menuju memori perangkat (*Host to Device*).
-* **Inisialisasi `cuSPARSE`:** Membuat `cusparseHandle_t` sebagai penanda bahwa kita akan memanggil mesin perkalian matriks resmi dari NVIDIA.
-* **Pengaturan Pasukan GPU (`threads1D` & `blocks1D`):** Membagi beban kerja ke dalam kelompok (Block). Setiap kelompok berisi 256 pekerja (Thread) yang akan beroperasi secara paralel. Rumus `(N + threads1D - 1) / threads1D` memastikan pembulatan ke atas agar tidak ada data yang terlewat.
-* **Eksekusi Kernel `initial_normalize_kernel`:** Ribuan pekerja GPU secara serentak menjumlahkan bobot di masing-masing kolom, lalu membagi setiap elemen dengan totalnya. Graf kini resmi menjadi Matriks Markov (Stokastik).
-
-*(Proses berlanjut ke Tahap 3: Iterasi MCL dan Tahap 4: Ekspor Data...)*
+Program menggunakan ifstream untuk membuka jalur komunikasi ke file CSV. Kode getline(file, line) pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
