@@ -49,4 +49,13 @@ ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
 ```
 
-Program menggunakan (`ifstream`) untuk membuka jalur komunikasi ke file CSV. Kode (`getline(file, line)`) pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
+Program menggunakan ifstream` untuk membuka jalur komunikasi ke file CSV. Kode `getline(file, line)` pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
+
+**3. Pemetaan ID Produk (Mapping)**
+
+Di dunia nyata, ID Produk (Product_A) sering kali berupa angka acak atau melompat-lompat `misal: 1045, 890, 3002`. Namun, matriks komputasi mewajibkan indeks dimulai berurutan dari `0, 1, 2, ... dst`.
+```cpp
+unordered_map<int, int> map_index;
+vector<int> reverse_map;
+int N = 0;
+```
