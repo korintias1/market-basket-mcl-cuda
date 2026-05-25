@@ -47,3 +47,6 @@ Data awal berupa file CSV (`edgelist_Aw_Cosine_10000.csv`) yang berisi koneksi a
 string file_name = "edgelist_Aw_Cosine_10000.csv";
 ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
+```
+
+Program menggunakan ifstream untuk membuka jalur komunikasi ke file CSV. Kode getline(file, line) pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
