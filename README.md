@@ -459,3 +459,56 @@ Sebagai gantinya, pustaka cuSPARSE menggunakan **Penyeimbangan Beban Dinamis**:
 * **Sedang (Puluhan koneksi):** Dikerjakan bergotong-royong oleh **1 Warp** (Grup berisi 32 *Thread*).
 * **Berat (Ribuan koneksi):** Diserbu secara masif oleh **1 Block penuh** (256 atau 512 *Thread* sekaligus).
 
+**4. Ekstraksi Ukuran, Alokasi Memori Permanen, dan Salin Data (Tahap Akhir SpGEMM)**
+
+```cpp
+        // Ambil info jumlah koneksi baru hasil perkalian
+        int64_t C_rows_64, C_cols_64, C_nnz_64;
+        CHECK_CUSPARSE(cusparseSpMatGetSize(matC, &C_rows_64, &C_cols_64, &C_nnz_64));
+        int C_nnz = (int)C_nnz_64;
+
+        int *d_C_row_idx; float *d_C_val;
+        CHECK_CUDA(cudaMalloc(&d_C_row_idx, C_nnz * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_C_val, C_nnz * sizeof(float)));
+        CHECK_CUSPARSE(cusparseCsrSetPointers(matC, d_C_col_ptr, d_C_row_idx, d_C_val));
+
+        // Eksekusi Copy Perkalian Sebenarnya
+        CHECK_CUSPARSE(cusparseSpGEMM_copy(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc));
+```
+
+Setelah tahap `compute` selesai, GPU secara internal sudah mengetahui wujud pasti dan jumlah koneksi dari Matriks C. Namun, informasi tersebut masih tertahan di dalam GPU. Kodingan di atas berfungsi untuk menarik laporan angka dari GPU, menyewa memori permanen yang ukurannya akurat, dan meresmikan pemindahan data.
+
+**Bedah Logika dan Parameter API Tahap Akhir:**
+
+**A. Bertanya Hasil Survei kepada GPU (`cusparseSpMatGetSize`)**
+Fungsi ini bertugas menginterogasi GPU mengenai dimensi matriks hasil.
+| Parameter | Logika & Penjelasan |
+| :--- | :--- |
+| `matC` | "KTP" matriks target yang mau kita interogasi informasinya. |
+| `&C_rows_64` | Tempat GPU menuliskan angka tunggal jumlah baris (pasti senilai $N$). |
+| `&C_cols_64` | Tempat GPU menuliskan angka tunggal jumlah kolom (pasti senilai $N$). |
+| `&C_nnz_64` | **Kunci Utama:** Tempat GPU menuliskan angka pasti total koneksi (NNZ) hasil Ekspansi. |
+
+*(Menggunakan simulasi 3 produk dari tahap sebelumnya, GPU akan merespons dengan mengisi variabel `C_nnz_64` dengan angka bulat **`3`**. Angka ini kemudian dikonversi menjadi integer standar 32-bit di variabel `C_nnz`)*.
+
+**B. Alokasi Memori Permanen (`cudaMalloc`)**
+Karena CPU sekarang sudah memegang angka pasti jumlah koneksi yang terbentuk (`C_nnz = 3`), CPU dengan yakin menyewa lahan memori yang presisi (tidak kurang dan tidak mubazir):
+* `d_C_row_idx` disewa sebesar 3 kotak bertipe *Integer* (untuk menyimpan `[0, 1, 2]`).
+* `d_C_val` disewa sebesar 3 kotak bertipe *Float* (untuk menyimpan `[0.357, 0.357, 0.643]`).
+
+**C. Memperbarui Identitas Matriks C (`cusparseCsrSetPointers`)**
+Di awal proyek, array baris dan nilai pada Matriks C kita isi dengan `nullptr` (kosong). Kini kita harus memperbaruinya.
+| Parameter | Logika & Penjelasan |
+| :--- | :--- |
+| `matC` | "KTP" Matriks C yang akan di-*update*. |
+| `d_C_col_ptr` | Memori batas kolom (ukuran $N+1$) yang sudah dialokasikan sejak awal. |
+| `d_C_row_idx` | Memori indeks baris baru yang ukurannya sudah menyesuaikan nilai `C_nnz`. |
+| `d_C_val` | Memori nilai bobot probabilitas baru yang juga sudah menyesuaikan nilai `C_nnz`. |
+
+**D. Pemindahan Data Final (`cusparseSpGEMM_copy`)**
+Ini adalah gong penutup operasi *Sparse*. Seluruh isi parameter di dalam kurung fungsi ini **100% sama persis** dengan fungsi `workEstimation` dan `compute` sebelumnya.
+| Mengapa Parameternya Harus Sama Persis? |
+| :--- |
+| Pemanggilan ulang dengan `handle`, matriks identitas yang sama, dan "Surat Perintah Kerja" (`spgemmDesc`) yang identik adalah cara GPU NVIDIA mengenali bahwa ini adalah **kelanjutan dari proyek komputasi yang sama**. GPU akan langsung mencari "kertas coretan" dari tahap komputasi sebelumnya, mengambil angka-angka CSC hasil Ekspansi yang sudah matang, lalu menyalinnya secara fisik ke dalam alamat memori permanen `matC` yang baru saja kita resmikan. |
+
+Melalui keseluruhan tarian operasi SpGEMM ini, algoritma MCL berhasil meledakkan koneksi "Teman dari Teman" dan menampungnya dengan aman ke dalam struktur memori GPU (VRAM) tanpa takut terjadi *Crash* atau kekurangan ruang.
