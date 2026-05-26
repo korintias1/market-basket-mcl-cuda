@@ -254,6 +254,62 @@ Tanda `<<< ... >>>` adalah aba-aba yang menyuruh ribuan pekerja GPU (sesuai form
 Di dalam fungsi ini, setiap pekerja memegang tepat 1 Kolom Produk. Mereka bertugas menjumlahkan total bobot (*weight*) di kolom tersebut, lalu membagi setiap nilai dengan totalnya. Hasilnya, matriks berubah wujud menjadi **Matriks Markov (Matriks Stokastik)** di mana jumlah setiap kolom pasti sama dengan 1.0. 
 Perintah `cudaDeviceSynchronize()` memastikan CPU diam menunggu sampai seluruh pekerja GPU selesai menormalisasi data.
 
+**5B. Penjelasan dan Simulasi Kernel Normalisasi Awal (`initial_normalize_kernel`)**
+
+```cpp
+// 1. Normalisasi Awal
+__global__ void initial_normalize_kernel(int N, const int* col_ptr, float* val) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < N) {
+        int start = col_ptr[col];
+        int end = col_ptr[col + 1];
+        float sum = 0.0f;
+        for (int i = start; i < end; ++i) {
+            sum += val[i];
+        }
+        if (sum > 0.0f) {
+            for (int i = start; i < end; ++i) {
+                val[i] /= sum;
+            }
+        }
+    }
+}
+```
+
+Fungsi berlabel `__global__` ini adalah kode yang dieksekusi murni di dalam inti (Cores) GPU NVIDIA. Tujuannya adalah mengubah matriks koneksi biasa menjadi **Matriks Markov (Stokastik)**, di mana total peluang (bobot) dari setiap produk (kolom) harus berjumlah tepat `1.0`.
+
+**Alur Logika Pekerja GPU (Thread):**
+1. **Pemetaan Pekerja (`int col = ...`):** Setiap *Thread* GPU diberi ID unik. ID ini digunakan secara langsung untuk mewakili satu Kolom Produk. (Contoh: Thread 0 mengurus Kolom 0, Thread 1 mengurus Kolom 1).
+2. **Pengecekan Batas (`if (col < N)`):** Mencegah *Thread* fiktif (kelebihan pekerja dari pembulatan `blocks1D`) memproses memori yang tidak ada.
+3. **Membaca Peta Sparse (`start` & `end`):** Karena nilai berderet memanjang di array `val`, GPU harus melihat array `col_ptr` untuk mengetahui di indeks ke berapa data kolomnya dimulai dan diakhiri.
+4. **Penjumlahan (Pass 1):** GPU menjumlahkan seluruh bobot di kolom tersebut (`sum += val[i]`).
+5. **Pembagian (Pass 2):** Jika kolom tersebut memiliki koneksi (`sum > 0.0`), setiap bobot dibagi dengan total `sum` agar menjadi probabilitas pecahan yang jika ditotal hasilnya `1.0`.
+
+---
+
+**Simulasi Visualisasi Eksekusi Paralel GPU (Normalisasi)**
+
+Mari kita gunakan hasil format CSC dari Tahap 6 sebelumnya: 
+* `col_ptr` = `{0, 2, 3, 3}` (Penunjuk batas)
+* `val` = `{0.5, 0.9, 0.4}` (Bobot asli)
+* Jumlah Produk `N = 3`.
+
+Di dalam GPU, **Thread 0, Thread 1, dan Thread 2 akan bekerja secara serentak (bersamaan) di detik yang sama.** Berikut adalah simulasi apa yang terjadi di dalam otak tiap-tiap pekerja GPU:
+
+| Tindakan | Thread 0 (Menangani Kolom 0) | Thread 1 (Menangani Kolom 1) | Thread 2 (Menangani Kolom 2) |
+| :--- | :--- | :--- | :--- |
+| **1. Baca Batas Awal (`start`)** | `col_ptr[0]` ➔ Indeks **`0`** | `col_ptr[1]` ➔ Indeks **`2`** | `col_ptr[2]` ➔ Indeks **`3`** |
+| **2. Baca Batas Akhir (`end`)** | `col_ptr[1]` ➔ Indeks **`2`** | `col_ptr[2]` ➔ Indeks **`3`** | `col_ptr[3]` ➔ Indeks **`3`** |
+| **3. Cari Nilai di Array `val`** | Membaca indeks ke-`0` dan `1` <br> *(Isi: `0.5` dan `0.9`)* | Membaca indeks ke-`2` <br> *(Isi: `0.4`)* | Membaca indeks ke-`3` sampai `3` <br> *(Kosong/Tidak ada data)* |
+| **4. Hitung Total (`sum`)** | `0.5 + 0.9` = **`1.4`** | `0.4` = **`0.4`** | Tidak ada proses = **`0.0`** |
+| **5. Operasi Pembagian (`val[i] /= sum`)** | Indeks 0: `0.5 / 1.4` = **`0.357`** <br> Indeks 1: `0.9 / 1.4` = **`0.643`** | Indeks 2: `0.4 / 0.4` = **`1.0`** | Syarat `sum > 0.0` gagal. <br> Diabaikan. |
+
+**Hasil Akhir di Memori GPU (`d_val`):**
+Setelah ketiga *Thread* selesai bekerja secara paralel, array nilai di memori GPU otomatis diperbarui menjadi:
+* `val` baru = **`{0.357, 0.643, 1.0}`**
+
+*(Kini setiap kolom secara matematis sudah valid menjadi probabilitas stokastik).*
+
 ```cpp
     vector<float> h_chaos(N, 0.0f);
     vector<int> h_nnz_per_col(N, 0);
@@ -349,16 +405,20 @@ Rumus baku komputasi ini adalah $C = \alpha (A \times A) + \beta C$. Kedua fungs
 | Parameter di Dalam Kurung | Variabel / Argumen | Logika & Penjelasan |
 | :--- | :--- | :--- |
 | **Sesi GPU** | `handle` | Menyerahkan tongkat komando ke mesin cuSPARSE. |
-| **Operasi Matriks Kiri/Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks tidak dibalik (baris dan kolom dibiarkan normal). |
-| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh. |
-| **Identitas Matriks Kiri & Kanan** | `matA` | Menggunakan matriks yang sama (Ekspansi diri sendiri). |
+| **Operasi Matriks Kiri** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks pertama tidak dibalik (baris dan kolom dibiarkan normal). |
+| **Operasi Matriks Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks kedua juga tidak dibalik. |
+| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh (dikali 1). |
+| **Identitas Matriks Kiri** | `matA` | Menggunakan "KTP" Matriks A yang sudah disiapkan sebelumnya. |
+| **Identitas Matriks Kanan** | `matA` | Menggunakan matriks yang sama, karena kita melakukan Ekspansi diri sendiri. |
 | **Skalar Pengali Tambahan** | `&beta` | Nilai `0.0f`, agar isi Matriks C yang masih hampa dianggap nol murni. |
 | **Identitas Matriks Hasil** | `matC` | Target penampungan, tempat GPU nanti akan menyusun matriks hasil. |
-| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan desimal (32-bit *Float*). |
-| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja secara otomatis. |
+| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan pecahan desimal biasa (32-bit *Float*). |
+| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja (*Thread Block*) secara otomatis dengan cara paling optimal. |
 | **Surat Perintah Kerja** | `spgemmDesc` | Buku catatan tempat GPU menulis progres pengerjaannya. |
-| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai memori yang dibutuhkannya. |
-| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer...` | *Kunci Eksekusi.* Diisi `nullptr` untuk meminta estimasi, dan diisi `dBuffer` (setelah di-*malloc*) untuk benar-benar menyuruh GPU bekerja. |
+| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai seberapa besar memori yang ia butuhkan. |
+| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer1`/`dBuffer2` | *Ini kuncinya.* Pemanggilan pertama diisi `nullptr` (hanya meminta angka estimasi ukuran). Setelah memori dialokasikan (`cudaMalloc`), pemanggilan kedua diisi alamat memori resminya (`dBuffer...`) agar GPU bisa mulai bekerja. |
+
+Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat letak-letak koneksi baru sudah terbentuk dengan jelas di dalam mesin GPU, siap untuk disalin ke memori permanen.
 
 ---
 
