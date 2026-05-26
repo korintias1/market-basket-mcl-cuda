@@ -318,3 +318,48 @@ Kita mengibaratkan Matriks C sebagai proyek pembangunan gedung yang belum selesa
 
 **Inisialisasi `spgemmDesc` (Surat Perintah Kerja):**
 Operasi *Sparse General Matrix-Matrix Multiplication* (SpGEMM) adalah algoritma komputasi yang sangat kompleks dan terdiri dari banyak langkah. GPU memerlukan wadah khusus untuk mencatat rencana estimasi memori, perhitungan kerangka struktur, hingga eksekusi akhirnya. Objek `spgemmDesc` bertindak sebagai "Buku Catatan Mandor Proyek" yang meresmikan dimulainya tahap perkalian tersebut.
+
+**3. Estimasi Memori dan Komputasi Struktur (Metode "Tanya-Bayar-Kerja")**
+
+```cpp
+        float alpha = 1.0f, beta = 0.0f;
+        size_t bufferSize1 = 0, bufferSize2 = 0;
+        void* dBuffer1 = nullptr; void* dBuffer2 = nullptr;
+
+        // Tanya GPU butuh memori berapa (Estimasi tahap 1)
+        CHECK_CUSPARSE(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, nullptr));
+        CHECK_CUDA(cudaMalloc(&dBuffer1, bufferSize1));
+        CHECK_CUSPARSE(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, dBuffer1));
+
+        // Tanya GPU butuh memori berapa untuk perhitungan (Estimasi tahap 2)
+        CHECK_CUSPARSE(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, nullptr));
+        CHECK_CUDA(cudaMalloc(&dBuffer2, bufferSize2));
+        CHECK_CUSPARSE(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, dBuffer2));
+```
+
+Karena jumlah koneksi (NNZ) hasil dari Ekspansi ($Matriks A \times Matriks A$) tidak bisa diprediksi di awal dan bisa membengkak drastis (memunculkan banyak koneksi "Teman dari Teman"), GPU memerlukan kertas coretan atau memori sementara (*buffer*) yang sangat besar. 
+
+Pustaka cuSPARSE menggunakan pola kodingan unik yang bisa diibaratkan seperti menyewa mandor proyek: **Tanya (Ukur) ➔ Bayar (Sewa Memori) ➔ Kerja (Eksekusi)**. Pola ini dilakukan dua kali:
+1. **Fase `workEstimation`:** GPU menyurvei bentuk matriks secara kasar.
+2. **Fase `compute`:** GPU mulai melakukan simulasi perkalian logis untuk merangkai struktur pasti dari Matriks C (belum menghitung nilai desimalnya).
+
+**Bedah Parameter API cuSPARSE (Dari Kiri ke Kanan):**
+Rumus baku komputasi ini adalah $C = \alpha (A \times A) + \beta C$. Kedua fungsi di atas (`workEstimation` dan `compute`) menggunakan isi parameter yang sama persis:
+
+| Parameter di Dalam Kurung | Variabel / Argumen | Logika & Penjelasan |
+| :--- | :--- | :--- |
+| **Sesi GPU** | `handle` | Menyerahkan tongkat komando ke mesin cuSPARSE. |
+| **Operasi Matriks Kiri** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks pertama tidak dibalik (baris dan kolom dibiarkan normal). |
+| **Operasi Matriks Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks kedua juga tidak dibalik. |
+| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh (dikali 1). |
+| **Identitas Matriks Kiri** | `matA` | Menggunakan "KTP" Matriks A yang sudah disiapkan sebelumnya. |
+| **Identitas Matriks Kanan** | `matA` | Menggunakan matriks yang sama, karena kita melakukan Ekspansi diri sendiri. |
+| **Skalar Pengali Tambahan** | `&beta` | Nilai `0.0f`, agar isi Matriks C yang masih hampa dianggap nol murni. |
+| **Identitas Matriks Hasil** | `matC` | Target penampungan, tempat GPU nanti akan menyusun matriks hasil. |
+| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan pecahan desimal biasa (32-bit *Float*). |
+| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja (*Thread Block*) secara otomatis dengan cara paling optimal. |
+| **Surat Perintah Kerja** | `spgemmDesc` | Buku catatan tempat GPU menulis progres pengerjaannya. |
+| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai seberapa besar memori yang ia butuhkan. |
+| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer1`/`dBuffer2` | *Ini kuncinya.* Pemanggilan pertama diisi `nullptr` (hanya meminta angka estimasi ukuran). Setelah memori dialokasikan (`cudaMalloc`), pemanggilan kedua diisi alamat memori resminya (`dBuffer...`) agar GPU bisa mulai bekerja. |
+
+Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat letak-letak koneksi baru sudah terbentuk dengan jelas di dalam mesin GPU, siap untuk disalin ke memori permanen.
