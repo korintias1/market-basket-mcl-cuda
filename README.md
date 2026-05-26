@@ -266,3 +266,55 @@ Perintah `cudaDeviceSynchronize()` memastikan CPU diam menunggu sampai seluruh p
 **6. Wadah Laporan & Stopwatch Internal GPU**
 * Vektor `h_chaos` dan `h_nnz_per_col` disiapkan di RAM sebagai keranjang kosong penerima laporan dari GPU di setiap akhir iterasi.
 * `cudaEvent_t` digunakan karena fungsi waktu bawaan CPU (seperti `time.h`) tidak akurat untuk mengukur kecepatan GPU. Perintah `cudaEventRecord(start)` ditekan tepat 1 milidetik sebelum Tahap 3 (Iterasi MCL) dimulai, untuk mengukur kecepatan konvergensi secara absolut.
+
+### TAHAP 3: Iterasi MCL Sparse (Ekspansi dan Perkalian cuSPARSE)
+
+Di dalam algoritma Markov Clustering (MCL), tahap **Ekspansi** adalah proses mengalikan matriks dengan dirinya sendiri (Matriks C = Matriks A $\times$ Matriks A). Tujuannya adalah untuk menemukan jalur koneksi baru antar-produk. Karena kita menggunakan matriks *Sparse* dan memori GPU, perkalian ini memerlukan prosedur khusus melalui pustaka NVIDIA cuSPARSE.
+
+**1. Pendaftaran Identitas Matriks (Descriptor)**
+```cpp
+        // 1. EKSPANSI (cuSPARSE M * M)
+        cusparseSpMatDescr_t matA, matC;
+        CHECK_CUSPARSE(cusparseCreateCsr(&matA, N, N, nnz, d_col_ptr, d_row_idx, d_val, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
+```
+GPU pada dasarnya "buta" dan hanya melihat array `d_col_ptr`, `d_row_idx`, dan `d_val` sebagai tumpukan angka acak di memori VRAM. Agar mesin cuSPARSE mengenali ketiga array tersebut sebagai satu kesatuan struktur data matriks, kita harus mendaftarkannya secara resmi menggunakan fitur *Descriptor* (bisa diibaratkan sebagai pembuatan "KTP" untuk matriks).
+
+Fungsi `cusparseCreateCsr` bertugas mengikat data mentah tersebut dengan aturan pembacaan yang ketat. Berikut adalah rincian formulir identitas yang diserahkan ke mesin cuSPARSE:
+
+| Parameter API | Variabel Input | Penjelasan Logika |
+| :--- | :--- | :--- |
+| **Target Descriptor** | `&matA` | Cetakan *descriptor* kosong yang akan diisi identitas matriks awal. |
+| **Dimensi Matriks** | `N, N` | Ukuran baris dan kolom. Karena ini graf antar-produk, bentuknya mutlak persegi ($N \times N$). |
+| **Jumlah Data (NNZ)** | `nnz` | Total jumlah koneksi yang saat ini hidup di dalam matriks. |
+| **Alamat Memori** | `d_col_ptr`, `d_row_idx`, `d_val` | Tiga lokasi array fisik yang sebelumnya sudah ditransfer ke memori GPU di Tahap 2. |
+| **Tipe Data Indeks 1** | `CUSPARSE_INDEX_32I` | Memberitahu GPU bahwa array batas kolom (`col_ptr`) bertipe *Integer* 32-bit. |
+| **Tipe Data Indeks 2** | `CUSPARSE_INDEX_32I` | Memberitahu GPU bahwa array indeks baris (`row_idx`) bertipe *Integer* 32-bit. |
+| **Titik Awal Indeks** | `CUSPARSE_INDEX_BASE_ZERO` | Mengunci aturan sistem bahwa perhitungan indeks array selalu dimulai dari angka `0` (standar C++). |
+| **Tipe Data Nilai** | `CUDA_R_32F` | Memberitahu GPU bahwa array bobot (`val`) berbentuk angka desimal biasa (*Real Float* 32-bit). |
+
+Setelah baris perintah ini dieksekusi, GPU resmi mengakui keberadaan `matA` sebagai matriks yang sah dan siap untuk dioperasikan dalam perhitungan matematika lanjutan.
+
+**2. Persiapan Wadah Hasil (Matriks C) dan Surat Perintah Kerja**
+```cpp
+        // Setup descriptor matriks hasil C (belum tau jumlah elemennya)
+        int* d_C_col_ptr;
+        CHECK_CUDA(cudaMalloc(&d_C_col_ptr, (N + 1) * sizeof(int)));
+        CHECK_CUSPARSE(cusparseCreateCsr(&matC, N, N, 0, d_C_col_ptr, nullptr, nullptr, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
+
+        cusparseSpGEMMDescr_t spgemmDesc;
+        CHECK_CUSPARSE(cusparseSpGEMM_createDescr(&spgemmDesc));
+```
+
+Berbeda dengan matriks padat (*Dense*) yang hasil perkaliannya selalu $N \times N$, hasil perkalian matriks *Sparse* akan menciptakan koneksi-koneksi baru yang jumlah total akhirnya tidak bisa ditebak oleh CPU pada saat ini. Oleh karena itu, kita membuat identitas matriks hasil (`matC`) secara bertahap.
+
+**Logika Pembuatan Matriks C (Identitas Sementara):**
+Kita mengibaratkan Matriks C sebagai proyek pembangunan gedung yang belum selesai.
+
+| Parameter Spesifik `matC` | Nilai yang Diinput | Alasan Logis |
+| :--- | :--- | :--- |
+| **Peta Batas Kolom (`col_ptr`)** | `d_C_col_ptr` | Kita sudah bisa memesan memori ini (`cudaMalloc`) karena ukuran dimensi batas kolom akan selalu pasti, yaitu $N + 1$. |
+| **Jumlah Koneksi (`nnz`)** | `0` | Diset nol untuk sementara, karena komputer belum tahu berapa total koneksi baru yang akan terlahir dari hasil perkalian Ekspansi. |
+| **Daftar Baris & Bobot** | `nullptr` (Kosong) | Dibiarkan hampa tanpa alokasi memori, karena ukurannya mutlak bergantung pada hasil perhitungan `nnz` di tahap selanjutnya. |
+
+**Inisialisasi `spgemmDesc` (Surat Perintah Kerja):**
+Operasi *Sparse General Matrix-Matrix Multiplication* (SpGEMM) adalah algoritma komputasi yang sangat kompleks dan terdiri dari banyak langkah. GPU memerlukan wadah khusus untuk mencatat rencana estimasi memori, perhitungan kerangka struktur, hingga eksekusi akhirnya. Objek `spgemmDesc` bertindak sebagai "Buku Catatan Mandor Proyek" yang meresmikan dimulainya tahap perkalian tersebut.
