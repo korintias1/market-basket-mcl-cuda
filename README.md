@@ -514,192 +514,22 @@ Ini adalah gong penutup operasi *Sparse*. Seluruh isi parameter di dalam kurung 
 
 Melalui keseluruhan tarian operasi SpGEMM ini, algoritma MCL berhasil meledakkan koneksi "Teman dari Teman" dan menampungnya dengan aman ke dalam struktur memori GPU (VRAM) tanpa takut terjadi *Crash* atau kekurangan ruang.
 
-### TAHAP 3: Iterasi MCL Sparse (Ekspansi dan Perkalian cuSPARSE)
+**4.1. Mengapa Alurnya Terbalik (Hitung Dulu, Baru Alokasi Memori, Lalu Salin)?**
 
-Di dalam algoritma Markov Clustering (MCL), tahap **Ekspansi** adalah proses mengalikan matriks dengan dirinya sendiri (Matriks C = Matriks A $\times$ Matriks A). Tujuannya adalah untuk menemukan jalur koneksi baru antar-produk. Karena kita menggunakan matriks *Sparse* dan memori GPU, perkalian ini memerlukan prosedur khusus melalui pustaka NVIDIA cuSPARSE.
+Bagi *programmer* yang terbiasa dengan bahasa tingkat tinggi, alur eksekusi SpGEMM ini sering kali terasa membingungkan. Mengapa kita melakukan operasi perkalian (`compute`) *sebelum* menciptakan memori penampungnya (`cudaMalloc`), lalu mengapa harus disalin lagi (`copy`)? 
 
-**1. Pendaftaran Identitas Matriks (Descriptor)**
-```cpp
-        // 1. EKSPANSI (cuSPARSE M * M)
-        cusparseSpMatDescr_t matA, matC;
-        CHECK_CUSPARSE(cusparseCreateCsr(&matA, N, N, nnz, d_col_ptr, d_row_idx, d_val, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-```
-GPU pada dasarnya "buta" dan hanya melihat array `d_col_ptr`, `d_row_idx`, dan `d_val` sebagai tumpukan angka acak di memori VRAM. Agar mesin cuSPARSE mengenali ketiga array tersebut sebagai satu kesatuan struktur data matriks, kita harus mendaftarkannya secara resmi menggunakan fitur *Descriptor* (bisa diibaratkan sebagai pembuatan "KTP" untuk matriks).
+Untuk memahami keharusan teknis ini, mari kita gunakan **Analogi Ujian Matematika**:
 
-Fungsi `cusparseCreateCsr` bertugas mengikat data mentah tersebut dengan aturan pembacaan yang ketat. Berikut adalah rincian formulir identitas yang diserahkan ke mesin cuSPARSE:
+Bayangkan mesin GPU adalah Anda yang sedang mengerjakan ujian aljabar perkalian matriks raksasa, dan `matC` adalah "Stopmap Jawaban Resmi" Anda. Aturan ujiannya sangat ketat: *Kertas jawaban yang dimasukkan ke dalam stopmap jumlah halamannya harus sama persis dengan jumlah baris jawaban akhir, tidak boleh kurang dan tidak boleh sisa (mubazir).*
 
-| Parameter API | Variabel Input | Penjelasan Logika |
+Karena Anda mengalikan matriks *Sparse*, Anda tidak akan tahu berapa jumlah persis koneksi ("Teman dari Teman") yang tercipta sebelum selesai menghitung semuanya. Berikut adalah apa yang sebenarnya terjadi di dalam mesin GPU pada setiap baris kodingan tersebut:
+
+| Tahap Eksekusi | Analogi Ujian Matematika | Proses Fisik di Dalam GPU |
 | :--- | :--- | :--- |
-| **Target Descriptor** | `&matA` | Cetakan *descriptor* kosong yang akan diisi identitas matriks awal. |
-| **Dimensi Matriks** | `N, N` | Ukuran baris dan kolom. Karena ini graf antar-produk, bentuknya mutlak persegi ($N \times N$). |
-| **Jumlah Data (NNZ)** | `nnz` | Total jumlah koneksi yang saat ini hidup di dalam matriks. |
-| **Alamat Memori** | `d_col_ptr`, `d_row_idx`, `d_val` | Tiga lokasi array fisik yang sebelumnya sudah ditransfer ke memori GPU di Tahap 2. |
-| **Tipe Data Indeks 1** | `CUSPARSE_INDEX_32I` | Memberitahu GPU bahwa array batas kolom (`col_ptr`) bertipe *Integer* 32-bit. |
-| **Tipe Data Indeks 2** | `CUSPARSE_INDEX_32I` | Memberitahu GPU bahwa array indeks baris (`row_idx`) bertipe *Integer* 32-bit. |
-| **Titik Awal Indeks** | `CUSPARSE_INDEX_BASE_ZERO` | Mengunci aturan sistem bahwa perhitungan indeks array selalu dimulai dari angka `0` (standar C++). |
-| **Tipe Data Nilai** | `CUDA_R_32F` | Memberitahu GPU bahwa array bobot (`val`) berbentuk angka desimal biasa (*Real Float* 32-bit). |
+| **1. `compute`** | **Menghitung di Kertas Buram.** Anda menghitung semua soal dan mencorat-coret hasilnya secara berantakan di atas Kertas Buram (`dBuffer2`). | GPU melakukan perkalian masif. Seluruh hasil angka desimal sementara berceceran di dalam *buffer* internal mesin NVIDIA yang formatnya berantakan dan tidak bisa kita akses langsung. Saat ini, `matC` masih berupa stopmap kosong (`nullptr`). |
+| **2. `GetSize`** | **Menghitung Total Baris Jawaban.** Setelah selesai menghitung di kertas buram, Anda menghitung: *"Oh, hasil ujian saya ternyata memakan tepat 1.500 baris."* | CPU menginterogasi GPU untuk mengekstrak angka `C_nnz` (Total Koneksi Baru) dari hasil perhitungan di *buffer* tadi. |
+| **3. `cudaMalloc`** | **Membeli Kertas Jawaban Resmi.** Karena sudah tahu butuh 1.500 baris, Anda baru berani memesan Kertas Jawaban Resmi bergaris sebanyak jumlah tersebut. | CPU akhirnya menyewa lahan memori VRAM yang ukurannya sangat presisi (`d_C_row_idx` dan `d_C_val`), sehingga tidak ada satu *byte* pun memori yang terbuang sia-sia. |
+| **4. `SetPointers`** | **Memasukkan Kertas ke Stopmap.** Anda menjepret kertas jawaban kosong yang baru dibeli ke dalam Stopmap Jawaban Resmi (`matC`). | CPU mengikatkan alamat memori array CSC yang baru dibuat ke dalam *descriptor* identitas `matC`. Sekarang `matC` sudah resmi memiliki wujud fisik penampung. |
+| **5. `copy`** | **Menyalin (Memindahkan) Jawaban.** Anda memindahkan tulisan dari Kertas Buram yang berantakan ke atas Kertas Jawaban Resmi di dalam stopmap dengan sangat rapi. |  <br> GPU mengambil data mentah dari *buffer* internal (`dBuffer2`), menyusunnya menjadi format array CSC yang terstruktur rapi, lalu menuangkan/menyalin angka-angka tersebut secara permanen ke dalam vektor-vektor milik `matC`. *Buffer* sementara kemudian bisa dihapus untuk menghemat VRAM. |
 
-Setelah baris perintah ini dieksekusi, GPU resmi mengakui keberadaan `matA` sebagai matriks yang sah dan siap untuk dioperasikan dalam perhitungan matematika lanjutan.
-
-**2. Persiapan Wadah Hasil (Matriks C) dan Surat Perintah Kerja**
-```cpp
-        // Setup descriptor matriks hasil C (belum tau jumlah elemennya)
-        int* d_C_col_ptr;
-        CHECK_CUDA(cudaMalloc(&d_C_col_ptr, (N + 1) * sizeof(int)));
-        CHECK_CUSPARSE(cusparseCreateCsr(&matC, N, N, 0, d_C_col_ptr, nullptr, nullptr, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-
-        cusparseSpGEMMDescr_t spgemmDesc;
-        CHECK_CUSPARSE(cusparseSpGEMM_createDescr(&spgemmDesc));
-```
-
-Berbeda dengan matriks padat (*Dense*) yang hasil perkaliannya selalu $N \times N$, hasil perkalian matriks *Sparse* akan menciptakan koneksi-koneksi baru yang jumlah total akhirnya tidak bisa ditebak oleh CPU pada saat ini. Oleh karena itu, kita membuat identitas matriks hasil (`matC`) secara bertahap.
-
-**Logika Pembuatan Matriks C (Identitas Sementara):**
-Kita mengibaratkan Matriks C sebagai proyek pembangunan gedung yang belum selesai.
-
-| Parameter Spesifik `matC` | Nilai yang Diinput | Alasan Logis |
-| :--- | :--- | :--- |
-| **Peta Batas Kolom (`col_ptr`)** | `d_C_col_ptr` | Kita sudah bisa memesan memori ini (`cudaMalloc`) karena ukuran dimensi batas kolom akan selalu pasti, yaitu $N + 1$. |
-| **Jumlah Koneksi (`nnz`)** | `0` | Diset nol untuk sementara, karena komputer belum tahu berapa total koneksi baru yang akan terlahir dari hasil perkalian Ekspansi. |
-| **Daftar Baris & Bobot** | `nullptr` (Kosong) | Dibiarkan hampa tanpa alokasi memori, karena ukurannya mutlak bergantung pada hasil perhitungan `nnz` di tahap selanjutnya. |
-
-**Inisialisasi `spgemmDesc` (Surat Perintah Kerja):**
-Operasi *Sparse General Matrix-Matrix Multiplication* (SpGEMM) adalah algoritma komputasi yang sangat kompleks dan terdiri dari banyak langkah. GPU memerlukan wadah khusus untuk mencatat rencana estimasi memori, perhitungan kerangka struktur, hingga eksekusi akhirnya. Objek `spgemmDesc` bertindak sebagai "Buku Catatan Mandor Proyek" yang meresmikan dimulainya tahap perkalian tersebut.
-
-**3. Estimasi Memori dan Komputasi Struktur (Metode "Tanya-Bayar-Kerja")**
-
-```cpp
-        float alpha = 1.0f, beta = 0.0f;
-        size_t bufferSize1 = 0, bufferSize2 = 0;
-        void* dBuffer1 = nullptr; void* dBuffer2 = nullptr;
-
-        // Tanya GPU butuh memori berapa (Estimasi tahap 1)
-        CHECK_CUSPARSE(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, nullptr));
-        CHECK_CUDA(cudaMalloc(&dBuffer1, bufferSize1));
-        CHECK_CUSPARSE(cusparseSpGEMM_workEstimation(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize1, dBuffer1));
-
-        // Tanya GPU butuh memori berapa untuk perhitungan (Estimasi tahap 2)
-        CHECK_CUSPARSE(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, nullptr));
-        CHECK_CUDA(cudaMalloc(&dBuffer2, bufferSize2));
-        CHECK_CUSPARSE(cusparseSpGEMM_compute(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc, &bufferSize2, dBuffer2));
-```
-
-Karena jumlah koneksi (NNZ) hasil dari Ekspansi ($Matriks A \times Matriks A$) tidak bisa diprediksi di awal dan bisa membengkak drastis (memunculkan banyak koneksi "Teman dari Teman"), GPU memerlukan kertas coretan atau memori sementara (*buffer*) yang sangat besar. 
-
-Pustaka cuSPARSE menggunakan pola kodingan unik yang bisa diibaratkan seperti menyewa mandor proyek: **Tanya (Ukur) ➔ Bayar (Sewa Memori) ➔ Kerja (Eksekusi)**. Pola ini dilakukan dua kali:
-1. **Fase `workEstimation`:** GPU menyurvei bentuk matriks secara kasar.
-2. **Fase `compute`:** GPU mulai melakukan simulasi perkalian logis untuk merangkai struktur pasti dari Matriks C (belum menghitung nilai desimalnya).
-
-**Bedah Parameter API cuSPARSE (Dari Kiri ke Kanan):**
-Rumus baku komputasi ini adalah $C = \alpha (A \times A) + \beta C$. Kedua fungsi di atas (`workEstimation` dan `compute`) menggunakan isi parameter yang sama persis:
-
-| Parameter di Dalam Kurung | Variabel / Argumen | Logika & Penjelasan |
-| :--- | :--- | :--- |
-| **Sesi GPU** | `handle` | Menyerahkan tongkat komando ke mesin cuSPARSE. |
-| **Operasi Matriks Kiri** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks pertama tidak dibalik (baris dan kolom dibiarkan normal). |
-| **Operasi Matriks Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks kedua juga tidak dibalik. |
-| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh (dikali 1). |
-| **Identitas Matriks Kiri** | `matA` | Menggunakan "KTP" Matriks A yang sudah disiapkan sebelumnya. |
-| **Identitas Matriks Kanan** | `matA` | Menggunakan matriks yang sama, karena kita melakukan Ekspansi diri sendiri. |
-| **Skalar Pengali Tambahan** | `&beta` | Nilai `0.0f`, agar isi Matriks C yang masih hampa dianggap nol murni. |
-| **Identitas Matriks Hasil** | `matC` | Target penampungan, tempat GPU nanti akan menyusun matriks hasil. |
-| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan pecahan desimal biasa (32-bit *Float*). |
-| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja (*Thread Block*) secara otomatis dengan cara paling optimal. |
-| **Surat Perintah Kerja** | `spgemmDesc` | Buku catatan tempat GPU menulis progres pengerjaannya. |
-| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai seberapa besar memori yang ia butuhkan. |
-| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer1`/`dBuffer2` | *Ini kuncinya.* Pemanggilan pertama diisi `nullptr` (hanya meminta angka estimasi ukuran). Setelah memori dialokasikan (`cudaMalloc`), pemanggilan kedua diisi alamat memori resminya (`dBuffer...`) agar GPU bisa mulai bekerja. |
-
-Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat letak-letak koneksi baru sudah terbentuk dengan jelas di dalam mesin GPU, siap untuk disalin ke memori permanen.
-
----
-
-
-
-**Simulasi Logika Perkalian Matriks Sparse di dalam `compute`**
-Berbeda dengan perkalian baris kali kolom biasa, operasi matriks CSC (SpGEMM) menggunakan algoritma berbasis "Kolom memanggil Kolom". 
-Mari kita gunakan data 3 Produk ($N = 3$) yang nilainya **sudah dinormalisasi** dari tahap sebelumnya: 
-* `col_ptr` = `[0, 2, 3, 3]`
-* `row_idx` = `[1, 2, 0]`
-* `val` = `[0.357, 0.643, 1.0]`
-
-Berikut adalah proses internal GPU saat mencari koneksi baru untuk mengisi Matriks C:
-
-| Target Eksekusi | Apa yang Dilihat/Dibaca oleh GPU di Memori | Eksekusi Perhitungan & Hasil |
-| :--- | :--- | :--- |
-| **Mencari Isi Kolom 0** | Cek Matriks Kanan di Kolom 0. Ada data di Baris **1** (0.357) dan Baris **2** (0.643). | • Panggil Kolom **1** Kiri: Ketemu data Baris 0 (1.0). <br>➔ Dikali: `0.357 * 1.0` = **`0.357`** <br>• Panggil Kolom **2** Kiri: Kosong. <br>➔ **Hasil Kolom 0:** Tercipta 1 koneksi di Baris 0 (0.357). |
-| **Mencari Isi Kolom 1** | Cek Matriks Kanan di Kolom 1. Ada data di Baris **0** (1.0). | • Panggil Kolom **0** Kiri: Ketemu data Baris 1 (0.357) dan Baris 2 (0.643). <br>➔ Dikali: `1.0 * 0.357` = **`0.357`** dan `1.0 * 0.643` = **`0.643`** <br>➔ **Hasil Kolom 1:** Tercipta 2 koneksi di Baris 1 (0.357) dan Baris 2 (0.643). |
-| **Mencari Isi Kolom 2** | Cek Matriks Kanan di Kolom 2. Indeks awal dan akhir sama (batas 3 sampai 3). | • Karena di Matriks Kanan kosong, GPU otomatis melompati proses ini. <br>➔ **Hasil Kolom 2:** Tetap kosong (0 koneksi). |
-
-**Hasil Akhir Matriks C (Disimpan dalam Format CSC)**
-Dari simulasi perkalian tersebut, Matriks C kini memegang total `C_nnz = 3` koneksi baru. Program secara otomatis menyusun dan menyimpan wujud fisik Matriks C ke dalam 3 buah array CSC yang berjejer rapi di memori GPU:
-* `C_col_ptr` = **`[0, 1, 3, 3]`** *(Dari batas 0 ke 1 ada 1 data. Batas 1 ke 3 ada 2 data. Batas 3 ke 3 kosong)*
-* `C_row_idx` = **`[0, 1, 2]`** *(Baris 0 milik Kolom 0. Baris 1 dan 2 milik Kolom 1)*
-* `C_val` = **`[0.357, 0.357, 0.643]`** *(Hasil angka perkalian sesuai urutan baris)*
-
----
-
-
-
-**Manajemen Pasukan Pekerja GPU (Dynamic Load Balancing)**
-Pada tahap ini tidak ada kodingan pemanggilan regu pekerja secara manual seperti `<<<blocks, threads>>>`. Fungsi cuSPARSE ini adalah sebuah *Black Box* (Kotak Hitam), di mana NVIDIA menyembunyikan logika penjadwalan *thread*-nya dari *programmer*.
-
-Alasannya adalah sifat matriks *Sparse* yang tidak seimbang (*imbalanced*). Jika NVIDIA memaksakan aturan baku "1 Thread mengerjakan 1 Kolom", GPU akan mengalami **Thread Divergence**. *Thread* yang menangani kolom kosong akan menganggur total, sementara *Thread* yang menangani kolom padat akan bekerja sendirian terlalu lama.
-
-Sebagai gantinya, pustaka cuSPARSE menggunakan **Penyeimbangan Beban Dinamis**:
-* **Ringan (1-5 koneksi):** Diserahkan kepada **1 Thread** GPU tunggal.
-* **Sedang (Puluhan koneksi):** Dikerjakan bergotong-royong oleh **1 Warp** (Grup berisi 32 *Thread*).
-* **Berat (Ribuan koneksi):** Diserbu secara masif oleh **1 Block penuh** (256 atau 512 *Thread* sekaligus).
-
-**4. Ekstraksi Ukuran, Alokasi Memori Permanen, dan Salin Data (Tahap Akhir SpGEMM)**
-
-```cpp
-        // Ambil info jumlah koneksi baru hasil perkalian
-        int64_t C_rows_64, C_cols_64, C_nnz_64;
-        CHECK_CUSPARSE(cusparseSpMatGetSize(matC, &C_rows_64, &C_cols_64, &C_nnz_64));
-        int C_nnz = (int)C_nnz_64;
-
-        int *d_C_row_idx; float *d_C_val;
-        CHECK_CUDA(cudaMalloc(&d_C_row_idx, C_nnz * sizeof(int)));
-        CHECK_CUDA(cudaMalloc(&d_C_val, C_nnz * sizeof(float)));
-        CHECK_CUSPARSE(cusparseCsrSetPointers(matC, d_C_col_ptr, d_C_row_idx, d_C_val));
-
-        // Eksekusi Copy Perkalian Sebenarnya
-        CHECK_CUSPARSE(cusparseSpGEMM_copy(handle, CUSPARSE_OPERATION_NON_TRANSPOSE, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, matA, &beta, matC, CUDA_R_32F, CUSPARSE_SPGEMM_DEFAULT, spgemmDesc));
-```
-
-Setelah tahap `compute` selesai, GPU secara internal sudah mengetahui wujud pasti dan jumlah koneksi dari Matriks C. Namun, informasi tersebut masih tertahan di dalam GPU. Kodingan di atas berfungsi untuk menarik laporan angka dari GPU, menyewa memori permanen yang ukurannya akurat, dan meresmikan pemindahan data.
-
-**Bedah Logika dan Parameter API Tahap Akhir:**
-
-**A. Bertanya Hasil Survei kepada GPU (`cusparseSpMatGetSize`)**
-Fungsi ini bertugas menginterogasi GPU mengenai dimensi matriks hasil.
-| Parameter | Logika & Penjelasan |
-| :--- | :--- |
-| `matC` | "KTP" matriks target yang mau kita interogasi informasinya. |
-| `&C_rows_64` | Tempat GPU menuliskan angka tunggal jumlah baris (pasti senilai $N$). |
-| `&C_cols_64` | Tempat GPU menuliskan angka tunggal jumlah kolom (pasti senilai $N$). |
-| `&C_nnz_64` | **Kunci Utama:** Tempat GPU menuliskan angka pasti total koneksi (NNZ) hasil Ekspansi. |
-
-*(Menggunakan simulasi 3 produk dari tahap sebelumnya, GPU akan merespons dengan mengisi variabel `C_nnz_64` dengan angka bulat **`3`**. Angka ini kemudian dikonversi menjadi integer standar 32-bit di variabel `C_nnz`)*.
-
-**B. Alokasi Memori Permanen (`cudaMalloc`)**
-Karena CPU sekarang sudah memegang angka pasti jumlah koneksi yang terbentuk (`C_nnz = 3`), CPU dengan yakin menyewa lahan memori yang presisi (tidak kurang dan tidak mubazir):
-* `d_C_row_idx` disewa sebesar 3 kotak bertipe *Integer* (untuk menyimpan `[0, 1, 2]`).
-* `d_C_val` disewa sebesar 3 kotak bertipe *Float* (untuk menyimpan `[0.357, 0.357, 0.643]`).
-
-**C. Memperbarui Identitas Matriks C (`cusparseCsrSetPointers`)**
-Di awal proyek, array baris dan nilai pada Matriks C kita isi dengan `nullptr` (kosong). Kini kita harus memperbaruinya.
-| Parameter | Logika & Penjelasan |
-| :--- | :--- |
-| `matC` | "KTP" Matriks C yang akan di-*update*. |
-| `d_C_col_ptr` | Memori batas kolom (ukuran $N+1$) yang sudah dialokasikan sejak awal. |
-| `d_C_row_idx` | Memori indeks baris baru yang ukurannya sudah menyesuaikan nilai `C_nnz`. |
-| `d_C_val` | Memori nilai bobot probabilitas baru yang juga sudah menyesuaikan nilai `C_nnz`. |
-
-**D. Pemindahan Data Final (`cusparseSpGEMM_copy`)**
-Ini adalah gong penutup operasi *Sparse*. Seluruh isi parameter di dalam kurung fungsi ini **100% sama persis** dengan fungsi `workEstimation` dan `compute` sebelumnya.
-| Mengapa Parameternya Harus Sama Persis? |
-| :--- |
-| Pemanggilan ulang dengan `handle`, matriks identitas yang sama, dan "Surat Perintah Kerja" (`spgemmDesc`) yang identik adalah cara GPU NVIDIA mengenali bahwa ini adalah **kelanjutan dari proyek komputasi yang sama**. GPU akan langsung mencari "kertas coretan" dari tahap komputasi sebelumnya, mengambil angka-angka CSC hasil Ekspansi yang sudah matang, lalu menyalinnya secara fisik ke dalam alamat memori permanen `matC` yang baru saja kita resmikan. |
-
-Melalui keseluruhan tarian operasi SpGEMM ini, algoritma MCL berhasil meledakkan koneksi "Teman dari Teman" dan menampungnya dengan aman ke dalam struktur memori GPU (VRAM) tanpa takut terjadi *Crash* atau kekurangan ruang.
+Melalui pola kerja ini, kita berhasil melakukan operasi dinamis yang sangat memakan memori di dalam lingkungan bahasa C++ yang menuntut manajemen memori statis dan presisi tinggi. Kertas buram (`dBuffer`) berfungsi sebagai pelindung agar program tidak *crash* akibat *Out-of-Memory*, dan operasi `copy` memastikan matriks hasil kita siap digunakan untuk tahap algoritma MCL selanjutnya (Inflasi & Pruning).
