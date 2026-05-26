@@ -349,17 +349,50 @@ Rumus baku komputasi ini adalah $C = \alpha (A \times A) + \beta C$. Kedua fungs
 | Parameter di Dalam Kurung | Variabel / Argumen | Logika & Penjelasan |
 | :--- | :--- | :--- |
 | **Sesi GPU** | `handle` | Menyerahkan tongkat komando ke mesin cuSPARSE. |
-| **Operasi Matriks Kiri** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks pertama tidak dibalik (baris dan kolom dibiarkan normal). |
-| **Operasi Matriks Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks kedua juga tidak dibalik. |
-| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh (dikali 1). |
-| **Identitas Matriks Kiri** | `matA` | Menggunakan "KTP" Matriks A yang sudah disiapkan sebelumnya. |
-| **Identitas Matriks Kanan** | `matA` | Menggunakan matriks yang sama, karena kita melakukan Ekspansi diri sendiri. |
+| **Operasi Matriks Kiri/Kanan** | `CUSPARSE_OPERATION_NON_TRANSPOSE` | Matriks tidak dibalik (baris dan kolom dibiarkan normal). |
+| **Skalar Pengali Awal** | `&alpha` | Nilai `1.0f`, agar hasil perkalian Matriks A nilainya utuh. |
+| **Identitas Matriks Kiri & Kanan** | `matA` | Menggunakan matriks yang sama (Ekspansi diri sendiri). |
 | **Skalar Pengali Tambahan** | `&beta` | Nilai `0.0f`, agar isi Matriks C yang masih hampa dianggap nol murni. |
 | **Identitas Matriks Hasil** | `matC` | Target penampungan, tempat GPU nanti akan menyusun matriks hasil. |
-| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan pecahan desimal biasa (32-bit *Float*). |
-| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja (*Thread Block*) secara otomatis dengan cara paling optimal. |
+| **Tipe Data Operasi** | `CUDA_R_32F` | Perhitungan dilakukan di mode bilangan desimal (32-bit *Float*). |
+| **Algoritma Internal** | `CUSPARSE_SPGEMM_DEFAULT` | Menyuruh GPU membagi beban kerja secara otomatis. |
 | **Surat Perintah Kerja** | `spgemmDesc` | Buku catatan tempat GPU menulis progres pengerjaannya. |
-| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai seberapa besar memori yang ia butuhkan. |
-| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer1`/`dBuffer2` | *Ini kuncinya.* Pemanggilan pertama diisi `nullptr` (hanya meminta angka estimasi ukuran). Setelah memori dialokasikan (`cudaMalloc`), pemanggilan kedua diisi alamat memori resminya (`dBuffer...`) agar GPU bisa mulai bekerja. |
+| **Wadah Ukuran Memori** | `&bufferSize1` / `&bufferSize2` | Tempat GPU menuliskan angka (dalam *byte*) mengenai memori yang dibutuhkannya. |
+| **Wadah Memori Coretan** | `nullptr` **ATAU** `dBuffer...` | *Kunci Eksekusi.* Diisi `nullptr` untuk meminta estimasi, dan diisi `dBuffer` (setelah di-*malloc*) untuk benar-benar menyuruh GPU bekerja. |
 
-Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat letak-letak koneksi baru sudah terbentuk dengan jelas di dalam mesin GPU, siap untuk disalin ke memori permanen.
+---
+
+
+
+**Simulasi Logika Perkalian Matriks Sparse di dalam `compute`**
+Berbeda dengan perkalian baris kali kolom biasa, operasi matriks CSC (SpGEMM) menggunakan algoritma berbasis "Kolom memanggil Kolom". 
+Mari kita gunakan data 3 Produk ($N = 3$) dari tahap sebelumnya: 
+* `col_ptr` = `[0, 2, 3, 3]`
+* `row_idx` = `[1, 2, 0]`
+* `val` = `[0.5, 0.9, 0.4]`
+
+Berikut adalah proses internal GPU saat mencari koneksi baru untuk mengisi Matriks C:
+
+| Target Eksekusi | Apa yang Dilihat/Dibaca oleh GPU di Memori | Eksekusi Perhitungan & Hasil |
+| :--- | :--- | :--- |
+| **Mencari Isi Kolom 0** | Cek Matriks Kanan di Kolom 0. Ada data di Baris **1** (0.5) dan Baris **2** (0.9). | • Panggil Kolom **1** Kiri: Ketemu data Baris 0 (0.4). Dikali: `0.5 * 0.4` = **`0.2`** <br>• Panggil Kolom **2** Kiri: Kosong. <br>➔ **Hasil Kolom 0:** Tercipta 1 koneksi di Baris 0 (0.2). |
+| **Mencari Isi Kolom 1** | Cek Matriks Kanan di Kolom 1. Ada data di Baris **0** (0.4). | • Panggil Kolom **0** Kiri: Ketemu data Baris 1 (0.5) dan Baris 2 (0.9). <br>➔ Dikali: `0.5 * 0.4` = **`0.2`** dan `0.9 * 0.4` = **`0.36`** <br>➔ **Hasil Kolom 1:** Tercipta 2 koneksi di Baris 1 (0.2) dan Baris 2 (0.36). |
+| **Mencari Isi Kolom 2** | Cek Matriks Kanan di Kolom 2. Indeks awal dan akhir sama (batas 3 sampai 3). | • Karena di Matriks Kanan kosong, GPU otomatis melompati proses ini. <br>➔ **Hasil Kolom 2:** Tetap kosong (0 koneksi). |
+
+Dari perhitungan tersebut, Matriks C kini diketahui memiliki total koneksi (NNZ) sebanyak $1 + 2 + 0 = \mathbf{3}$ koneksi baru.
+
+---
+
+
+
+**Manajemen Pasukan Pekerja GPU (Dynamic Load Balancing)**
+Anda mungkin menyadari bahwa pada tahap ini tidak ada kodingan pemanggilan regu pekerja secara manual seperti `<<<blocks, threads>>>`. Fungsi cuSPARSE ini adalah sebuah *Black Box* (Kotak Hitam), di mana NVIDIA menyembunyikan logika penjadwalan *thread*-nya dari *programmer*.
+
+Alasannya adalah sifat matriks *Sparse* yang tidak seimbang (*imbalanced*). Jika NVIDIA memaksakan aturan baku "1 Thread mengerjakan 1 Kolom" (seperti pada tahap Normalisasi Awal), GPU akan mengalami **Thread Divergence**. *Thread* yang menangani kolom kosong akan menganggur total, sementara *Thread* yang menangani kolom padat akan bekerja sendirian terlalu lama.
+
+Sebagai gantinya, pustaka cuSPARSE menggunakan **Penyeimbangan Beban Dinamis**:
+* **Ringan (1-5 koneksi):** Diserahkan kepada **1 Thread** GPU tunggal.
+* **Sedang (Puluhan koneksi):** Dikerjakan bergotong-royong oleh **1 Warp** (Grup berisi 32 *Thread*).
+* **Berat (Ribuan koneksi):** Diserbu secara masif oleh **1 Block penuh** (256 atau 512 *Thread* sekaligus).
+
+Strategi cerdas inilah yang membuat operasi SpGEMM cuSPARSE jauh lebih cepat dan stabil dibandingkan *kernel* perkalian manual.
