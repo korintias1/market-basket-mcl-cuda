@@ -426,33 +426,36 @@ Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat 
 
 **Simulasi Logika Perkalian Matriks Sparse di dalam `compute`**
 Berbeda dengan perkalian baris kali kolom biasa, operasi matriks CSC (SpGEMM) menggunakan algoritma berbasis "Kolom memanggil Kolom". 
-Mari kita gunakan data 3 Produk ($N = 3$) dari tahap sebelumnya: 
+Mari kita gunakan data 3 Produk ($N = 3$) yang nilainya **sudah dinormalisasi** dari tahap sebelumnya: 
 * `col_ptr` = `[0, 2, 3, 3]`
 * `row_idx` = `[1, 2, 0]`
-* `val` = `[0.5, 0.9, 0.4]`
+* `val` = `[0.357, 0.643, 1.0]`
 
 Berikut adalah proses internal GPU saat mencari koneksi baru untuk mengisi Matriks C:
 
 | Target Eksekusi | Apa yang Dilihat/Dibaca oleh GPU di Memori | Eksekusi Perhitungan & Hasil |
 | :--- | :--- | :--- |
-| **Mencari Isi Kolom 0** | Cek Matriks Kanan di Kolom 0. Ada data di Baris **1** (0.5) dan Baris **2** (0.9). | • Panggil Kolom **1** Kiri: Ketemu data Baris 0 (0.4). Dikali: `0.5 * 0.4` = **`0.2`** <br>• Panggil Kolom **2** Kiri: Kosong. <br>➔ **Hasil Kolom 0:** Tercipta 1 koneksi di Baris 0 (0.2). |
-| **Mencari Isi Kolom 1** | Cek Matriks Kanan di Kolom 1. Ada data di Baris **0** (0.4). | • Panggil Kolom **0** Kiri: Ketemu data Baris 1 (0.5) dan Baris 2 (0.9). <br>➔ Dikali: `0.5 * 0.4` = **`0.2`** dan `0.9 * 0.4` = **`0.36`** <br>➔ **Hasil Kolom 1:** Tercipta 2 koneksi di Baris 1 (0.2) dan Baris 2 (0.36). |
+| **Mencari Isi Kolom 0** | Cek Matriks Kanan di Kolom 0. Ada data di Baris **1** (0.357) dan Baris **2** (0.643). | • Panggil Kolom **1** Kiri: Ketemu data Baris 0 (1.0). <br>➔ Dikali: `0.357 * 1.0` = **`0.357`** <br>• Panggil Kolom **2** Kiri: Kosong. <br>➔ **Hasil Kolom 0:** Tercipta 1 koneksi di Baris 0 (0.357). |
+| **Mencari Isi Kolom 1** | Cek Matriks Kanan di Kolom 1. Ada data di Baris **0** (1.0). | • Panggil Kolom **0** Kiri: Ketemu data Baris 1 (0.357) dan Baris 2 (0.643). <br>➔ Dikali: `1.0 * 0.357` = **`0.357`** dan `1.0 * 0.643` = **`0.643`** <br>➔ **Hasil Kolom 1:** Tercipta 2 koneksi di Baris 1 (0.357) dan Baris 2 (0.643). |
 | **Mencari Isi Kolom 2** | Cek Matriks Kanan di Kolom 2. Indeks awal dan akhir sama (batas 3 sampai 3). | • Karena di Matriks Kanan kosong, GPU otomatis melompati proses ini. <br>➔ **Hasil Kolom 2:** Tetap kosong (0 koneksi). |
 
-Dari perhitungan tersebut, Matriks C kini diketahui memiliki total koneksi (NNZ) sebanyak $1 + 2 + 0 = \mathbf{3}$ koneksi baru.
+**Hasil Akhir Matriks C (Disimpan dalam Format CSC)**
+Dari simulasi perkalian tersebut, Matriks C kini memegang total `C_nnz = 3` koneksi baru. Program secara otomatis menyusun dan menyimpan wujud fisik Matriks C ke dalam 3 buah array CSC yang berjejer rapi di memori GPU:
+* `C_col_ptr` = **`[0, 1, 3, 3]`** *(Dari batas 0 ke 1 ada 1 data. Batas 1 ke 3 ada 2 data. Batas 3 ke 3 kosong)*
+* `C_row_idx` = **`[0, 1, 2]`** *(Baris 0 milik Kolom 0. Baris 1 dan 2 milik Kolom 1)*
+* `C_val` = **`[0.357, 0.357, 0.643]`** *(Hasil angka perkalian sesuai urutan baris)*
 
 ---
 
 
 
 **Manajemen Pasukan Pekerja GPU (Dynamic Load Balancing)**
-Anda mungkin menyadari bahwa pada tahap ini tidak ada kodingan pemanggilan regu pekerja secara manual seperti `<<<blocks, threads>>>`. Fungsi cuSPARSE ini adalah sebuah *Black Box* (Kotak Hitam), di mana NVIDIA menyembunyikan logika penjadwalan *thread*-nya dari *programmer*.
+Pada tahap ini tidak ada kodingan pemanggilan regu pekerja secara manual seperti `<<<blocks, threads>>>`. Fungsi cuSPARSE ini adalah sebuah *Black Box* (Kotak Hitam), di mana NVIDIA menyembunyikan logika penjadwalan *thread*-nya dari *programmer*.
 
-Alasannya adalah sifat matriks *Sparse* yang tidak seimbang (*imbalanced*). Jika NVIDIA memaksakan aturan baku "1 Thread mengerjakan 1 Kolom" (seperti pada tahap Normalisasi Awal), GPU akan mengalami **Thread Divergence**. *Thread* yang menangani kolom kosong akan menganggur total, sementara *Thread* yang menangani kolom padat akan bekerja sendirian terlalu lama.
+Alasannya adalah sifat matriks *Sparse* yang tidak seimbang (*imbalanced*). Jika NVIDIA memaksakan aturan baku "1 Thread mengerjakan 1 Kolom", GPU akan mengalami **Thread Divergence**. *Thread* yang menangani kolom kosong akan menganggur total, sementara *Thread* yang menangani kolom padat akan bekerja sendirian terlalu lama.
 
 Sebagai gantinya, pustaka cuSPARSE menggunakan **Penyeimbangan Beban Dinamis**:
 * **Ringan (1-5 koneksi):** Diserahkan kepada **1 Thread** GPU tunggal.
 * **Sedang (Puluhan koneksi):** Dikerjakan bergotong-royong oleh **1 Warp** (Grup berisi 32 *Thread*).
 * **Berat (Ribuan koneksi):** Diserbu secara masif oleh **1 Block penuh** (256 atau 512 *Thread* sekaligus).
 
-Strategi cerdas inilah yang membuat operasi SpGEMM cuSPARSE jauh lebih cepat dan stabil dibandingkan *kernel* perkalian manual.
