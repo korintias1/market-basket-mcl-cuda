@@ -875,3 +875,115 @@ Program memanggil fungsi `ofstream` (*Output File Stream*) untuk menciptakan dan
 2.  **`mcl_attributes_final_sparse.csv`**: *File* ini akan digunakan untuk mendata profil setiap produk (Atribut Node). Pencetakan baris judulnya disiapkan untuk mencatat identitas produk (*Product_ID*), masuk ke kelompok mana produk tersebut (*Cluster_ID*), dan apa perannya di dalam klaster tersebut (*Status_Titik*).
 
 Kedua file tersebut sekarang dalam status "terbuka" dan siap untuk diisi baris demi baris menggunakan algoritma ekstraksi *Sparse* pada tahap selanjutnya.
+
+### TAHAP 10: Ekstraksi Klaster, Penulisan File CSV, dan Terminasi
+
+Ini adalah bagian puncak dari seluruh program. Setelah memori disalin kembali ke RAM pusat (CPU), data vektor berformat CSC tersebut harus diterjemahkan kembali menjadi bahasa manusia dan format jaringan (graf) yang bisa dibaca oleh aplikasi analisis data.
+
+Algoritma *Markov Clustering* (MCL) mendefinisikan klaster melalui konsep **Attractor** (Pusat Tarikan). Sebuah produk akan bergabung ke dalam klaster milik produk lain jika nilai probabilitas akhirnya ke produk tersebut adalah yang paling dominan (maksimal). 
+
+
+
+**1. Proses Penerjemahan dan Ekstraksi Atribut**
+```cpp
+        for (int col = 0; col < N; ++col) {
+            float max_val = -1.0f;
+            int attractor_idx = -1;
+            int start = final_col_ptr[col];
+            int end = final_col_ptr[col + 1];
+
+            for (int i = start; i < end; ++i) {
+                int row = final_row_idx[i];
+                float v = final_val[i];
+                
+                // Menulis ke file Edge List
+                file_matrix << reverse_map[row] << "," << reverse_map[col] << "," << v << "\n";
+                
+                // Mencari koneksi terkuat (Cluster Center)
+                if (v > max_val) {
+                    max_val = v;
+                    attractor_idx = row;
+                }
+            }
+
+            // Menulis ke file Node Attributes
+            if (attractor_idx != -1) {
+                int current_product_id = reverse_map[col];
+                int cluster_id = reverse_map[attractor_idx]; 
+                string status = (col == attractor_idx) ? "Host" : "Anggota";
+                file_attr << current_product_id << "," << cluster_id << "," << status << "\n";
+            }
+        }
+```
+
+**Bedah Logika Kodingan:**
+* **Perulangan Luar (`for col`)**: CPU mengeksekusi setiap kolom satu per satu. Dalam logika graf, Kolom = Produk Asal (*Source Node*). Variabel `max_val` dan `attractor_idx` di-reset setiap berpindah kolom.
+* **Batas Eksekusi (`start`, `end`)**: Melihat dari indeks mana sampai mana data koneksi untuk kolom tersebut disimpan di dalam array `final_val` dan `final_row_idx`.
+* **Perulangan Dalam (`for i`)**: Mengurai koneksi yang selamat di kolom tersebut. Variabel `row` = Produk Tujuan (*Target Node*).
+* **`reverse_map`**: Karena GPU hanya bisa menghitung indeks angka urut (0, 1, 2, dst.), kita menggunakan variabel `reverse_map` (dibuat di awal program) untuk menerjemahkan kembali indeks `0` tersebut menjadi ID Produk asli di *database* (misalnya ID `101`).
+* **Logika *Attractor***: Kodingan `if (v > max_val)` bertugas mencari nilai probabilitas tertinggi di kolom tersebut. Baris tujuan dari probabilitas tertinggi tersebut ditetapkan sebagai `attractor_idx` (Pemimpin Klaster).
+* **Penentuan Status (Ternary Operator)**: `(col == attractor_idx) ? "Host" : "Anggota"`.
+    Ini adalah fungsi logika mutlak: Jika ID Produk menunjuk ke dirinya sendiri sebagai pemimpin, maka statusnya adalah **"Host"** (Pusat Klaster). Jika ia menunjuk ke produk lain, ia hanyalah **"Anggota"**.
+
+---
+
+**Simulasi Pengisian File Berdasarkan Data Terakhir**
+
+Kita lanjutkan data VRAM terakhir yang berhasil dipanen:
+* Total Produk `N` = 3.
+* `final_col_ptr` = `[0, 0, 1, 1]`
+* `final_row_idx` = `[2]`
+* `final_val` = `[1.0]`
+
+Mari kita asumsikan `reverse_map` kita adalah: 
+* Indeks `0` = ID **101** | Indeks `1` = ID **102** | Indeks `2` = ID **103**
+
+Berikut adalah proses penerjemahan array tersebut secara fisik oleh CPU:
+
+| Eksekusi Kolom (Source) | Logika `start` & `end` di Array CSC | Iterasi Koneksi & Pencarian *Attractor* | Hasil yang Ditulis ke `file_attr.csv` |
+| :--- | :--- | :--- | :--- |
+| **Kolom 0** (ID: 101) | `start` = `0`<br>`end` = `0` | Karena batas sama, *looping* koneksi dilewati otomatis. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
+| **Kolom 1** (ID: 102) | `start` = `0`<br>`end` = `1` | Membaca indeks `0` pada memori:<br>• `row` = `2` (ID: 103)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,102,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`102`**<br>Klaster ID: **`103`**<br>Status: **`Anggota`** (karena $1 \neq 2$). |
+| **Kolom 2** (ID: 103) | `start` = `1`<br>`end` = `1` | Karena batas sama, *looping* koneksi dilewati. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
+
+*(Catatan Simulasi: Pada kondisi graf riil yang sudah konvergen sempurna, Kolom 2 seharusnya menyisakan koneksi bernilai 1.0 ke dirinya sendiri (Baris 2) sehingga berstatus "Host". Tabel di atas murni melacak mutlak sisa angka dari pemangkasan simulasi kita sebelumnya).*
+
+Hasil fisik *file* CSV di *hard drive* Anda akan berwujud seperti ini:
+
+**Isi `mcl_matrix_final_sparse.csv`:**
+```csv
+Product_A,Product_B,Weight
+103,102,1.0
+```
+
+**Isi `mcl_attributes_final_sparse.csv`:**
+```csv
+Product_ID,Cluster_ID,Status_Titik
+102,103,Anggota
+```
+
+---
+
+**2. Penutupan Dokumen dan Terminasi Total**
+```cpp
+        file_matrix.close(); 
+        file_attr.close();
+        cout << "Ekspor berhasil! File CSV siap." << endl;
+
+        // Bersihkan seluruh memori akhir
+        cudaFree(d_col_ptr); cudaFree(d_row_idx); cudaFree(d_val); 
+        cudaFree(d_nnz_per_col); cudaFree(d_chaos);
+        cusparseDestroy(handle); 
+        cudaEventDestroy(start); cudaEventDestroy(stop);
+
+        return 0;
+    }
+```
+
+Sebagai aturan baku pemrograman C++ tingkat rendah (*low-level*), seluruh sumber daya sistem yang kita pinjam harus dikembalikan sebelum program ditutup (`return 0;`).
+
+* **Menutup File**: Fungsi `.close()` memutus aliran (Stream) dari RAM ke *hard drive* dan menyimpan wujud fisik CSV-nya agar bisa diakses oleh program lain.
+* **Menghapus Memori Final GPU**: Array batas kolom, baris, nilai, serta array laporan `chaos` yang masih tersisa di VRAM dimusnahkan secara permanen (`cudaFree`).
+* **Melepas Perangkat Keras**: Sesi komunikasi dengan mesin cuSPARSE diputus (`cusparseDestroy`), dan *stopwatch* perangkat keras GPU juga dihancurkan (`cudaEventDestroy`).
+
+Dengan dieksekusinya `return 0`, program melepaskan cengkeramannya pada perangkat keras GPU Anda. Seluruh siklus komputasi paralel dari pembacaan data awal hingga pencetakan klaster akhir telah rampung dengan efisiensi memori yang maksimal berkat format operasi *Sparse*.
