@@ -533,3 +533,99 @@ Karena Anda mengalikan matriks *Sparse*, Anda tidak akan tahu berapa jumlah pers
 | **5. `copy`** | **Menyalin (Memindahkan) Jawaban.** Anda memindahkan tulisan dari Kertas Buram yang berantakan ke atas Kertas Jawaban Resmi di dalam stopmap dengan sangat rapi. |  <br> GPU mengambil data mentah dari *buffer* internal (`dBuffer2`), menyusunnya menjadi format array CSC yang terstruktur rapi, lalu menuangkan/menyalin angka-angka tersebut secara permanen ke dalam vektor-vektor milik `matC`. *Buffer* sementara kemudian bisa dihapus untuk menghemat VRAM. |
 
 Melalui pola kerja ini, kita berhasil melakukan operasi dinamis yang sangat memakan memori di dalam lingkungan bahasa C++ yang menuntut manajemen memori statis dan presisi tinggi. Kertas buram (`dBuffer`) berfungsi sebagai pelindung agar program tidak *crash* akibat *Out-of-Memory*, dan operasi `copy` memastikan matriks hasil kita siap digunakan untuk tahap algoritma MCL selanjutnya (Inflasi & Pruning).
+
+### TAHAP 4: Operasi Matematika Inti MCL (Inflasi, Prune, Normalisasi, dan Chaos)
+
+Setelah Matriks C (hasil dari $A \times A$) berhasil dibentuk di dalam GPU, kita perlu menerapkan aturan matematika algoritma Markov Clustering (MCL) terhadap matriks tersebut. 
+
+Berbeda dengan tahap sebelumnya yang bergantung pada pustaka cuSPARSE (*Black Box*), pada tahap ini kita membuat *Kernel* CUDA C++ buatan sendiri. Strategi pembagian kerjanya sangat sederhana dan deterministik: **1 Thread GPU bertugas mengeksekusi 1 Kolom Produk secara independen.**
+
+**1. Pemanggilan Eksekusi Kernel**
+```cpp
+        // 2. INFLASI, PRUNE, NORMALISASI, CHAOS
+        inflate_prune_normalize_chaos_kernel<<<blocks1D, threads1D>>>(N, d_C_col_ptr, d_C_val, inflation_p, prune_threshold, d_nnz_per_col, d_chaos);
+        CHECK_CUDA(cudaDeviceSynchronize());
+```
+Kita meluncurkan kernel dengan konfigurasi grid 1-Dimensi (`blocks1D`, `threads1D`). Perintah `cudaDeviceSynchronize()` memastikan CPU menunggu hingga seluruh *Thread* GPU selesai bekerja sebelum melanjutkan ke baris kodingan berikutnya.
+
+Berikut adalah rincian data yang kita kirimkan ke dalam mesin GPU:
+*   **`N`**: Total jumlah produk.
+*   **`d_C_col_ptr`**: Array batas kolom Matriks C (digunakan *Thread* untuk mengetahui dari indeks mana sampai mana ia harus membaca data di kolom tugasnya).
+*   **`d_C_val`**: Array nilai bobot desimal probabilitas dari Matriks C. (Kita tidak mengirimkan `d_C_row_idx` karena operasi matematika ini tidak memedulikan arah koneksi, hanya peduli pada manipulasi bobot nilainya).
+*   **`inflation_p`**: Parameter eksponen/pangkat (biasanya disetel `2.0`).
+*   **`prune_threshold`**: Batas bawah pemangkasan (misal `0.15`). Koneksi dengan bobot di bawah ini akan dihapus.
+*   **`d_nnz_per_col`**: Array penampung baru untuk mencatat jumlah koneksi yang selamat (*valid*) di setiap kolom setelah di-pruning.
+*   **`d_chaos`**: Array penampung baru untuk mencatat tingkat kekonvergenan (Chaos) dari tiap kolom.
+
+---
+
+**2. Anatomi Fungsi *Kernel* (Paket 4-in-1)**
+```cpp
+// 2. Paket 3-in-1: Inflasi -> Pruning -> Normalisasi -> Hitung Chaos
+__global__ void inflate_prune_normalize_chaos_kernel(int N, const int* col_ptr, float* val, float power, float threshold, int* nnz_per_col, float* chaos_arr) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < N) {
+        int start = col_ptr[col];
+        int end = col_ptr[col + 1];
+        float sum = 0.0f;
+        int valid_nnz = 0;
+
+        // Pass 1: Inflasi & Prune
+        for (int i = start; i < end; ++i) {
+            float v = val[i];
+            if (v > 0.0f) {
+                v = powf(v, power);
+                if (v < threshold) v = 0.0f; // Pruning
+                val[i] = v;
+                sum += v;
+                if (v > 0.0f) valid_nnz++; 
+            }
+        }
+        nnz_per_col[col] = valid_nnz; // Simpan untuk Compaction nanti
+
+        // Pass 2: Normalisasi Ulang & Hitung Local Chaos
+        float max_val = 0.0f;
+        float sum_sq = 0.0f;
+        if (sum > 0.0f) {
+            for (int i = start; i < end; ++i) {
+                if (val[i] > 0.0f) {
+                    float norm_v = val[i] / sum;
+                    val[i] = norm_v;
+                    if (norm_v > max_val) max_val = norm_v;
+                    sum_sq += norm_v * norm_v;
+                }
+            }
+        }
+        chaos_arr[col] = max_val - sum_sq;
+    }
+}
+```
+Keempat proses matematika ini (Inflasi, Prune, Normalisasi, dan Chaos) sengaja digabung ke dalam satu fungsi (di dalam satu blok `if (col < N)`). Ini adalah teknik **optimasi akses memori GPU**. Jika keempat proses ini dipisah menjadi fungsi kernel yang berbeda-beda, GPU harus membuang banyak waktu hanya untuk membaca dan menulis ulang array `val` dari/ke VRAM (yang mana sangat lambat). Dengan menggabungkannya, GPU cukup membaca data satu kali ke dalam *register memory* yang super cepat, memprosesnya 4 kali berturut-turut, lalu menuliskan hasil akhirnya kembali ke VRAM.
+
+---
+
+**3. Simulasi Eksekusi Memori per *Thread***
+
+Mari kita simulasikan bagaimana *kernel* ini mengeksekusi array Matriks C hasil perhitungan SpGEMM sebelumnya.
+*   **Data Awal Matriks C:**
+    *   Total Produk (`N`) = 3
+    *   `col_ptr` = `[0, 1, 3, 3]`
+    *   `val` = `[0.357, 0.357, 0.643]`
+*   **Aturan yang Disetel:** Pangkat Inflasi (`power`) = **2.0** | Batas Prune (`threshold`) = **0.15**
+
+Karena $N = 3$, GPU menugaskan 3 buah *Thread* (Thread 0, 1, dan 2) untuk berjalan secara bersamaan/paralel. Berikut adalah proses yang terjadi di dalam masing-masing *Thread*:
+
+| Pekerja | Data yang Dibaca (Berdasarkan `col_ptr`) | Pass 1: Inflasi & Prune | Pass 2: Normalisasi & Hitung Chaos | Hasil yang Ditulis ke Memori GPU |
+| :--- | :--- | :--- | :--- | :--- |
+| **Thread 0**<br>*(Target: Kolom 0)* | Membaca indeks `0` sampai `1`.<br>➔ Ditemukan data: **`0.357`** | **Inflasi:** $0.357^2 = 0.127$<br>**Prune:** Karena $0.127 < 0.15$, nilai dibunuh menjadi **`0.0`**.<br>**Catatan:** `valid_nnz = 0`, `sum = 0.0` | Karena `sum = 0.0`, tahap normalisasi dilewati otomatis.<br>**Chaos:** `max_val` ($0$) - `sum_sq` ($0$) = **`0.0`** | `val[0]` = **`0.0`**<br>`nnz_per_col[0]` = **`0`**<br>`chaos_arr[0]` = **`0.0`** |
+| **Thread 1**<br>*(Target: Kolom 1)* | Membaca indeks `1` sampai `3`.<br>➔ Data 1: **`0.357`**<br>➔ Data 2: **`0.643`** | **Data 1:** $0.357^2 = 0.127$ (Dibunuh jadi **`0.0`**)<br>**Data 2:** $0.643^2 = 0.413$ (Selamat karena $> 0.15$).<br>**Catatan:** `valid_nnz = 1`, `sum = 0.413` | **Data 1:** Lewat (karena sudah `0.0`)<br>**Data 2 (Normalisasi):** $0.413 / 0.413 =$ **`1.0`**<br>**Chaos:** `max_val` ($1.0$) - `sum_sq` ($1.0^2$) = **`0.0`** | `val[1]` = **`0.0`**<br>`val[2]` = **`1.0`**<br>`nnz_per_col[1]` = **`1`**<br>`chaos_arr[1]` = **`0.0`** |
+| **Thread 2**<br>*(Target: Kolom 2)* | Membaca indeks `3` sampai `3`.<br>➔ Tidak ada data (kosong). | Tidak ada operasi berjalan.<br>**Catatan:** `valid_nnz = 0`, `sum = 0.0` | Tahap ini dilewati otomatis.<br>**Chaos = `0.0`** | `nnz_per_col[2]` = **`0`**<br>`chaos_arr[2]` = **`0.0`** |
+
+**Kondisi Akhir VRAM Setelah Eksekusi:**
+Setelah kernel ini selesai tersinkronisasi (`cudaDeviceSynchronize`), kondisi fisik memori Matriks C kita berubah drastis menjadi:
+1.  **`val`** (Bobot): Berubah dari `[0.357, 0.357, 0.643]` menjadi **`[0.0, 0.0, 1.0]`**.
+2.  **`nnz_per_col`** (Laporan Koneksi Selamat): Berisi **`[0, 1, 0]`**.
+3.  **`chaos_arr`** (Indikator Kekonvergenan): Berisi **`[0.0, 0.0, 0.0]`**.
+
+**Masalah Baru yang Muncul:**
+Terdapat konsekuensi matematis dari proses di atas. Array `val` kita sekarang dipenuhi oleh banyak angka **`0.0`**. Di dalam sistem Matriks *Sparse*, menyimpan memori untuk nilai nol murni adalah hal yang tabu dan membuang-buang kapasitas VRAM. Oleh sebab itu, tahapan selanjutnya yang harus kita lakukan adalah proses pemadatan data (*Compaction*) untuk menyapu bersih sampah nilai nol tersebut.
