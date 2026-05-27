@@ -826,3 +826,52 @@ Arsitektur sistem CUDA berjalan secara **Asinkron**, yang berarti komputer pusat
 1.  **`cudaEventRecord(stop)`:** Ini adalah instruksi mutlak. CPU memerintahkan GPU untuk mencatat waktu persis sesaat setelah GPU menuntaskan tugas terakhirnya.
 2.  **`cudaEventSynchronize(stop)`:** Ini adalah "Ruang Tunggu". Karena CPU berlari jauh lebih cepat membaca teks kodingan daripada GPU menghitung matematika, baris ini **memaksa CPU untuk diam dan menunggu** sampai GPU benar-benar selesai bekerja dan melapor. Tanpa baris ini, CPU akan nekat mencoba menghitung selisih waktu saat GPU masih sibuk bekerja, yang berujung pada eror komputasi.
 3.  **`cudaEventElapsedTime`:** Setelah GPU melapor selesai (sinkronisasi berhasil), barulah CPU diizinkan menghitung selisih matematis antara garis `start` di awal program dengan garis `stop` ini, menghasilkan total waktu eksekusi dalam wujud milidetik (`milliseconds`).
+
+### TAHAP 9: Penarikan Hasil Akhir dan Persiapan Ekspor (Device to Host)
+
+Setelah siklus algoritma MCL berhasil mencapai konvergensi dan dihentikan, wujud akhir dari graf klaster kita masih tertahan di dalam memori VRAM GPU. Tahap ini bertugas mencetak laporan waktu, menarik data dari GPU kembali ke RAM komputer utama (CPU), dan menyiapkan wadah *file* berekstensi CSV untuk menyimpan hasil tersebut.
+
+**1. Pencetakan Laporan Performa ke Layar**
+```cpp
+        cout << "\n=================================================" << endl;
+        cout << "Komputasi MCL SPARSE Selesai." << endl;
+        cout << "WAKTU EKSEKUSI GPU : " << milliseconds / 1000.0 << " detik." << endl;
+        cout << "Koneksi Tersisa Akhir: " << nnz << " (Format Sparse)" << endl;
+        cout << "=================================================\n" << endl;
+```
+Bagian ini murni bersifat kosmetik untuk antarmuka pengguna (UI) di terminal/konsol. Variabel `milliseconds` yang didapat dari *stopwatch* CUDA tadi dibagi `1000.0` agar format laporannya berubah menjadi satuan detik (*seconds*). Nilai `nnz` terakhir dicetak untuk memamerkan betapa ringkasnya matriks hasil pemangkasan algoritma ini.
+
+**2. Alokasi Penampung Memori di RAM Komputer (CPU)**
+```cpp
+        vector<int> final_col_ptr(N + 1);
+        vector<int> final_row_idx(nnz);
+        vector<float> final_val(nnz);
+```
+Sebelum CPU bisa menarik data dari GPU, CPU harus menyiapkan "ruang kosong" di RAM komputernya sendiri. Kita menggunakan struktur `std::vector` standar bawaan C++:
+* `final_col_ptr`: Disiapkan sebesar `N + 1` kotak.
+* `final_row_idx` & `final_val`: Disiapkan tepat sebesar sisa koneksi terakhir (`nnz`).
+
+**3. Penarikan Data (Download) dari VRAM ke RAM**
+```cpp
+        CHECK_CUDA(cudaMemcpy(final_col_ptr.data(), d_col_ptr, (N + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(final_row_idx.data(), d_row_idx, nnz * sizeof(int), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(final_val.data(), d_val, nnz * sizeof(float), cudaMemcpyDeviceToHost));
+```
+Ini adalah kebalikan dari proses awal (*upload*) saat kita memasukkan data graf. CPU mengeksekusi `cudaMemcpy` dengan instruksi mutlak **`cudaMemcpyDeviceToHost`** (Dari GPU ke CPU).
+Ketiga array format CSC (`d_col_ptr`, `d_row_idx`, `d_val`) yang mewakili arsitektur klaster final dari produk-produk kita disalin seutuhnya ke dalam vektor `final_...` yang sudah disiapkan di atas. Setelah ketiga baris ini terlewati, pekerjaan GPU resmi selesai total.
+
+**4. Inisialisasi File Ekspor Data (*Output CSV*)**
+```cpp
+        ofstream file_matrix("mcl_matrix_final_sparse.csv");
+        file_matrix << "Product_A,Product_B,Weight\n";
+        
+        ofstream file_attr("mcl_attributes_final_sparse.csv");
+        file_attr << "Product_ID,Cluster_ID,Status_Titik\n";
+```
+Untuk keperluan analisis lanjutan (misalnya untuk divisualisasikan menggunakan R, Python, atau Gephi), data yang sudah berada di RAM CPU tadi harus ditulis ke dalam bentuk *file* fisik. 
+
+Program memanggil fungsi `ofstream` (*Output File Stream*) untuk menciptakan dan membuka dua buah *file* berektensi `.csv` di folder proyek Anda:
+1.  **`mcl_matrix_final_sparse.csv`**: *File* ini akan digunakan untuk menyimpan daftar koneksi yang tersisa (*Edge List*). Baris `file_matrix << ...` bertugas mencetak judul kolomnya (Header), yaitu *Product_A* (sumber), *Product_B* (target), dan *Weight* (bobot probabilitas akhirnya).
+2.  **`mcl_attributes_final_sparse.csv`**: *File* ini akan digunakan untuk mendata profil setiap produk (Atribut Node). Pencetakan baris judulnya disiapkan untuk mencatat identitas produk (*Product_ID*), masuk ke kelompok mana produk tersebut (*Cluster_ID*), dan apa perannya di dalam klaster tersebut (*Status_Titik*).
+
+Kedua file tersebut sekarang dalam status "terbuka" dan siap untuk diisi baris demi baris menggunakan algoritma ekstraksi *Sparse* pada tahap selanjutnya.
