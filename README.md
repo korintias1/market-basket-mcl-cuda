@@ -629,3 +629,73 @@ Setelah kernel ini selesai tersinkronisasi (`cudaDeviceSynchronize`), kondisi fi
 
 **Masalah Baru yang Muncul:**
 Terdapat konsekuensi matematis dari proses di atas. Array `val` kita sekarang dipenuhi oleh banyak angka **`0.0`**. Di dalam sistem Matriks *Sparse*, menyimpan memori untuk nilai nol murni adalah hal yang tabu dan membuang-buang kapasitas VRAM. Oleh sebab itu, tahapan selanjutnya yang harus kita lakukan adalah proses pemadatan data (*Compaction*) untuk menyapu bersih sampah nilai nol tersebut.
+
+### TAHAP 5A: Compaction (Pemadatan Memori Matriks Sparse) - Persiapan
+
+Akibat dari proses *Pruning* di tahap sebelumnya, banyak koneksi antar-produk yang nilainya terhapus menjadi **`0.0`**. Di dalam sistem matriks *Sparse* (seperti format CSC), menyimpan angka nol adalah hal yang diharamkan karena membuang-buang kapasitas VRAM GPU. 
+
+Tahap *Compaction* ini bertujuan untuk "membangun rumah baru" yang ukurannya jauh lebih kecil dan pas, khusus untuk menyimpan koneksi-koneksi yang masih selamat saja. 
+
+**Kodingan Persiapan dan Alokasi Memori Baru:**
+```cpp
+        // 3. COMPACTION (Pemadatan Matriks agar Hemat Memori)
+        CHECK_CUDA(cudaMemcpy(h_nnz_per_col.data(), d_nnz_per_col, N * sizeof(int), cudaMemcpyDeviceToHost));
+        
+        vector<int> h_new_col_ptr(N + 1, 0);
+        for (int i = 0; i < N; ++i) {
+            h_new_col_ptr[i + 1] = h_new_col_ptr[i] + h_nnz_per_col[i]; 
+        }
+        int new_nnz = h_new_col_ptr[N];
+
+        int *d_new_col_ptr, *d_new_row_idx; float *d_new_val;
+        CHECK_CUDA(cudaMalloc(&d_new_col_ptr, (N + 1) * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_new_row_idx, new_nnz * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_new_val, new_nnz * sizeof(float)));
+        
+        CHECK_CUDA(cudaMemcpy(d_new_col_ptr, h_new_col_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+```
+
+Karena GPU tidak bisa mengubah ukuran array-nya sendiri secara dinamis, program harus bolak-balik berkoordinasi antara memori RAM komputer pusat (CPU/Host) dan memori VRAM (GPU/Device). Berikut adalah rincian 5 langkah yang terjadi di dalam blok kodingan tersebut:
+
+**1. Menarik Laporan Kerja ke CPU (`cudaMemcpy`)**
+CPU menarik array `d_nnz_per_col` (laporan jumlah koneksi yang selamat) dari VRAM GPU menuju ke RAM biasa agar bisa dibaca oleh sistem.
+| Parameter dalam Kurung | Logika & Penjelasan |
+| :--- | :--- |
+| `h_nnz_per_col.data()` | Alamat tujuan di RAM CPU (Prefix `h_` menandakan *Host*). |
+| `d_nnz_per_col` | Alamat sumber data di VRAM GPU (Prefix `d_` menandakan *Device*). |
+| `N * sizeof(int)` | Ukuran paket yang dikirim (Jumlah produk dikali ukuran 1 kotak *Integer*). |
+| `cudaMemcpyDeviceToHost` | Perintah mutlak arah penyalinan data: Dari GPU ke CPU. |
+
+**2 & 3. Merakit Peta Batas Baru dan Ekstraksi Ukuran Total**
+Dengan laporan di tangan, CPU menghitung peta batas kolom (`col_ptr`) yang baru menggunakan rumus kumulatif (*Prefix Sum*). CPU juga mengambil angka paling ujung dari hasil tersebut untuk mengetahui total ukuran matriks yang baru (`new_nnz`).
+
+**4. Pemesanan Lahan VRAM Super Hemat (`cudaMalloc`)**
+CPU memesan tiga lahan memori baru di GPU yang ukurannya sudah disusutkan secara drastis berdasarkan perhitungan `new_nnz`.
+
+**5. Mengirim Peta Batas Baru ke GPU (`cudaMemcpy`)**
+Karena GPU tidak tahu letak batas-batas array yang baru, CPU mengirimkan kembali array batas tersebut kembali ke memori GPU (`cudaMemcpyHostToDevice`).
+
+---
+
+**Simulasi Pemadatan Memori (Berdasarkan Hasil Ekspansi Sebelumnya)**
+
+Mari kita teruskan data simulasi kita. Matriks C sebelumnya memiliki 3 produk (`N = 3`) dan awalnya memiliki 3 total koneksi (`NNZ = 3`). Setelah melewati tahap Inflasi & Prune, laporan sisa koneksi (`h_nnz_per_col`) yang ditarik ke CPU berisi array: **`[0, 1, 0]`**.
+
+Berikut adalah proses bagaimana CPU merakit array batas (`col_ptr`) yang baru menggunakan rumus kumulatif (*Prefix Sum*):
+
+| Target Indeks | Sisa Koneksi Laporan | Rumus Matematika (Batas Lama + Laporan Baru) | Wujud Array `new_col_ptr` |
+| :--- | :--- | :--- | :--- |
+| **Indeks 0** (Awal) | - | Secara mutlak selalu dimulai dari angka `0`. | `[0]` |
+| **Indeks 1** (Kolom 0) | Ada **`0`** koneksi | Angka sebelumnya (`0`) + Laporan Kolom 0 (`0`) = **`0`** | `[0, 0]` |
+| **Indeks 2** (Kolom 1) | Ada **`1`** koneksi | Angka sebelumnya (`0`) + Laporan Kolom 1 (`1`) = **`1`** | `[0, 0, 1]` |
+| **Indeks 3** (Kolom 2) | Ada **`0`** koneksi | Angka sebelumnya (`1`) + Laporan Kolom 2 (`0`) = **`1`** | `[0, 0, 1, 1]` |
+
+**Penghematan Ekstrem yang Terjadi:**
+Dari perhitungan di atas, didapatkan bahwa array batas yang baru adalah **`[0, 0, 1, 1]`**. 
+Angka paling ujung dari array tersebut adalah **`1`**. Angka ini diekstrak menjadi nilai total koneksi matriks (`new_nnz = 1`).
+
+Maka, saat tahap alokasi memori berjalan:
+* Array baris (`d_new_row_idx`) dan array bobot (`d_new_val`) yang baru, masing-masing **hanya disewa sebesar 1 buah kotak memori saja**. 
+* Bandingkan dengan Matriks C sebelum di-pruning yang memakan 3 kotak memori. Semakin besar graf Anda (misal jutaan koneksi), tahap *Compaction* ini akan menghemat bergiga-giga kapasitas VRAM di dalam GPU.
+
+Di akhir langkah ini, rumah memori yang baru dan efisien sudah berdiri di GPU. Namun, rumah tersebut masih kosong. Tahap selanjutnya adalah memindahkan secara fisik nilai-nilai yang selamat tersebut ke dalam struktur memori yang baru ini.
