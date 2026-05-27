@@ -876,6 +876,7 @@ Program memanggil fungsi `ofstream` (*Output File Stream*) untuk menciptakan dan
 
 Kedua file tersebut sekarang dalam status "terbuka" dan siap untuk diisi baris demi baris menggunakan algoritma ekstraksi *Sparse* pada tahap selanjutnya.
 
+
 ### TAHAP 10: Ekstraksi Klaster, Penulisan File CSV, dan Terminasi
 
 Ini adalah bagian puncak dari seluruh program. Setelah memori disalin kembali ke RAM pusat (CPU), data vektor berformat CSC tersebut harus diterjemahkan kembali menjadi bahasa manusia dan format jaringan (graf) yang bisa dibaca oleh aplikasi analisis data.
@@ -936,17 +937,30 @@ Kita lanjutkan data VRAM terakhir yang berhasil dipanen:
 * `final_val` = `[1.0]`
 
 Mari kita asumsikan `reverse_map` kita adalah: 
-* Indeks `0` = ID **101** | Indeks `1` = ID **102** | Indeks `2` = ID **103**
+* Indeks `0` = **Produk A (ID: 101)**
+* Indeks `1` = **Produk B (ID: 102)**
+* Indeks `2` = **Produk C (ID: 103)**
 
 Berikut adalah proses penerjemahan array tersebut secara fisik oleh CPU:
 
 | Eksekusi Kolom (Source) | Logika `start` & `end` di Array CSC | Iterasi Koneksi & Pencarian *Attractor* | Hasil yang Ditulis ke `file_attr.csv` |
 | :--- | :--- | :--- | :--- |
-| **Kolom 0** (ID: 101) | `start` = `0`<br>`end` = `0` | Karena batas sama, *looping* koneksi dilewati otomatis. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
-| **Kolom 1** (ID: 102) | `start` = `0`<br>`end` = `1` | Membaca indeks `0` pada memori:<br>• `row` = `2` (ID: 103)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,102,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`102`**<br>Klaster ID: **`103`**<br>Status: **`Anggota`** (karena $1 \neq 2$). |
-| **Kolom 2** (ID: 103) | `start` = `1`<br>`end` = `1` | Karena batas sama, *looping* koneksi dilewati. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
+| **Kolom 0** (Produk A) | `start` = `0`<br>`end` = `0` | Karena batas sama, *looping* koneksi dilewati otomatis. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
+| **Kolom 1** (Produk B) | `start` = `0`<br>`end` = `1` | Membaca indeks `0` pada memori:<br>• `row` = `2` (Produk C)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,102,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`102`**<br>Klaster ID: **`103`**<br>Status: **`Anggota`** (karena $1 \neq 2$). |
+| **Kolom 2** (Produk C) | `start` = `1`<br>`end` = `1` | Karena batas sama, *looping* koneksi dilewati. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
 
 *(Catatan Simulasi: Pada kondisi graf riil yang sudah konvergen sempurna, Kolom 2 seharusnya menyisakan koneksi bernilai 1.0 ke dirinya sendiri (Baris 2) sehingga berstatus "Host". Tabel di atas murni melacak mutlak sisa angka dari pemangkasan simulasi kita sebelumnya).*
+
+**Visualisasi Wujud Matriks Akhir**
+Jika array CSC yang telah dipadatkan tersebut dibongkar kembali dan digambar layaknya matriks matematika normal (*Dense Matrix*), maka wujud struktur probabilitas akhir antar-produk di memori Anda adalah seperti ini:
+
+| Target Aliran Probabilitas (Baris) \ Sumber (Kolom) | Produk A (ID: 101) | Produk B (ID: 102) | Produk C (ID: 103) |
+| :--- | :--- | :--- | :--- |
+| **Produk A (ID: 101)** | `0.0` | `0.0` | `0.0` |
+| **Produk B (ID: 102)** | `0.0` | `0.0` | `0.0` |
+| **Produk C (ID: 103)** | `0.0` | **`1.0`** | `0.0` |
+
+> *Cara membacanya: Lihat kolom Produk B. Produk B menyerahkan 100% probabilitasnya (1.0) ke arah Produk C. Inilah bukti matematis bahwa Produk B telah resmi menjadi anggota dari klaster yang dipimpin oleh Produk C.*
 
 Hasil fisik *file* CSV di *hard drive* Anda akan berwujud seperti ini:
 
