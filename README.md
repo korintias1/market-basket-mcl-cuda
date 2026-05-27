@@ -4,20 +4,20 @@ Repositori ini berisi implementasi algoritma Markov Clustering (MCL) menggunakan
 
 ## Visualisasi Konsep Matriks: Dense vs Sparse (CSC)
 
-Algoritma ini menggunakan format **Compressed Sparse Column (CSC)**. Format ini mengubah representasi graf dua dimensi menjadi tiga array linear agar dapat diproses secepat kilat oleh GPU.
+Algoritma ini menggunakan format **Compressed Sparse Column (CSC)**. Format ini mengubah representasi graf dua dimensi menjadi tiga array linear agar dapat diproses secepat kilat oleh GPU. Syarat utama algoritma ini berjalan dengan baik adalah adanya *Self-Loop* (koneksi ke diri sendiri) agar sebuah node tidak mati saat pemangkasan.
 
-**Contoh Matriks Padat (Dense Matrix):**
-| Produk (Kolom) | 0 | 1 | 2 |
+**Contoh Matriks Padat (Dense Matrix) dengan Self-Loop:**
+| Target (Baris) \ Sumber (Kolom) | Produk 101 (Kolom 0) | Produk 102 (Kolom 1) | Produk 103 (Kolom 2) |
 | :--- | :---: | :---: | :---: |
-| **Baris 0** | 0.0 | 0.4 | 0.0 |
-| **Baris 1** | 0.5 | 0.0 | 0.0 |
-| **Baris 2** | 0.9 | 0.0 | 0.0 |
+| **Produk 101 (Baris 0)** | **1.0** | 0.4 | 0.0 |
+| **Produk 102 (Baris 1)** | 0.5 | **1.0** | 0.0 |
+| **Produk 103 (Baris 2)** | 0.9 | 0.0 | **1.0** |
 
 **Transformasi ke Format CSC di Memori:**
 Untuk matriks di atas, program tidak menyimpan angka `0.0`. Memori direpresentasikan dalam tiga vektor (*array*):
-* `col_ptr = {0, 2, 3, 3}` (Peta batas awal dan akhir setiap kolom)
-* `row_idx = {1, 2, 0}` (Posisi baris dari elemen yang memiliki nilai)
-* `val = {0.5, 0.9, 0.4}` (Bobot/nilai probabilitasnya)
+* `col_ptr = {0, 3, 5, 6}` (Peta batas awal dan akhir setiap kolom)
+* `row_idx = {0, 1, 2, 0, 1, 2}` (Posisi baris dari elemen yang memiliki nilai)
+* `val = {1.0, 0.5, 0.9, 0.4, 1.0, 1.0}` (Bobot/nilai probabilitasnya)
 
 ---
 
@@ -37,10 +37,14 @@ Tahap ini krusial untuk mengubah data mentah berbentuk *Edgelist* menjadi strukt
 
 **1. Format Edgelist Input**
 Data awal berupa file CSV (`edgelist_Aw_Cosine_10000.csv`) yang berisi koneksi antar-produk dan nilai kemiripannya (*Cosine Similarity*).
-| Product_A | Product_B | Weight |
+| Product_A (Source) | Product_B (Target) | Weight |
 | :---: | :---: | :---: |
-| 1045 | 890 | 0.45 |
-| 1045 | 1045 | 1.0 |
+| 101 | 101 | 1.0 |
+| 101 | 102 | 0.5 |
+| 101 | 103 | 0.9 |
+| 102 | 101 | 0.4 |
+| 102 | 102 | 1.0 |
+| 103 | 103 | 1.0 |
 
 **2. Membuka File Stream (`ifstream`)**
 ```cpp
@@ -49,7 +53,7 @@ ifstream file(file_name);
 if (!file.is_open()) { cerr << "Error: File tidak ditemukan!" << endl; return 1; }
 ```
 
-Program menggunakan ifstream` untuk membuka jalur komunikasi ke file CSV. Kode `getline(file, line)` pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
+Program menggunakan `ifstream` untuk membuka jalur komunikasi ke file CSV. Kode `getline(file, line)` pertama dipanggil untuk melompati baris pertama (judul kolom) agar tidak ikut terhitung sebagai data.
 
 **3. Pemetaan ID Produk (Mapping)**
 
@@ -59,10 +63,10 @@ unordered_map<int, int> map_index;
 vector<int> reverse_map;
 int N = 0;
 ```
-*   **`map_index` (Kamus Maju)**: Bertugas menerjemahkan ID asli menjadi indeks matriks.
-    *   *Contoh*: ID `1045` diterjemahkan menjadi indeks `0`.
-*   **`reverse_map` (Kamus Mundur)**: Menyimpan urutan ID asli. Ini sangat penting untuk **Tahap 4 (Ekspor)** agar komputer bisa menerjemahkan kembali indeks `0` menjadi ID `1045` saat dicetak ke CSV hasil.
-*   **Variabel `N`**: Bertindak sebagai penghitung jumlah produk unik yang ditemukan.
+* **`map_index` (Kamus Maju)**: Bertugas menerjemahkan ID asli menjadi indeks matriks.
+    * *Contoh*: ID `101` diterjemahkan menjadi indeks `0`.
+* **`reverse_map` (Kamus Mundur)**: Menyimpan urutan ID asli. Ini sangat penting untuk **Tahap 4 (Ekspor)** agar komputer bisa menerjemahkan kembali indeks `0` menjadi ID `101` saat dicetak ke CSV hasil.
+* **Variabel `N`**: Bertindak sebagai penghitung jumlah produk unik yang ditemukan.
 
 **4. Parsing dan Pengekstrakan Baris**
 ```cpp
@@ -78,9 +82,9 @@ Program membaca file baris demi baris menggunakan looping `while`. Fitur `string
 Bayangkan komputer sedang membaca baris data CSV Anda. Teks utuh tersebut ditangkap oleh variabel `line`. Mesin `stringstream` kemudian memindai teks tersebut dari kiri ke kanan dan memotongnya setiap kali bertemu tanda koma (`,`).
 | Teks Mentah (`line`) | Proses Pemotongan | Variabel Tujuan | Hasil Akhir (String) |
 | :--- | :--- | :--- | :--- |
-| `"1045,890,0.45"` | ➔ Potongan Pertama | `str_A` | `"1045"` |
-| | ➔ Potongan Kedua | `str_B` | `"890"` |
-| | ➔ Potongan Ketiga | `str_W` | `"0.45"` |
+| `"101,101,1.0"` | ➔ Potongan Pertama | `str_A` | `"101"` |
+| | ➔ Potongan Kedua | `str_B` | `"101"` |
+| | ➔ Potongan Ketiga | `str_W` | `"1.0"` |
 
 **5. Konversi dan Penyimpanan ke Array (`temp_edges`)**
 
@@ -98,19 +102,19 @@ Bayangkan komputer sedang membaca baris data CSV Anda. Teks utuh tersebut ditang
 
 Setelah teks terpotong menjadi tiga variabel string, program wajib mengubah wujud teks tersebut menjadi angka matematis murni. Selanjutnya, program melakukan pemetaan (*Mapping*) agar ID Produk yang angkanya acak atau sangat besar bisa dirapatkan menjadi urutan indeks matriks yang rapi (selalu dimulai dari 0).
 
-**Simulasi Visualisasi Proses Pemetaan (Data Baris Pertama: "1045", "890", "0.45"):**
+**Simulasi Visualisasi Proses Pemetaan (Data Baris Pertama: "101", "101", "1.0"):**
 Anggaplah ini adalah baris data pertama yang diproses oleh program, sehingga memori indeks awal masih bernilai nol (`N = 0`). Berikut adalah urutan kejadian di dalam memori komputer:
 
 | Tahap Proses | Variabel / Perintah | Nilai / Hasil Memori | Penjelasan Logika |
 | :--- | :--- | :--- | :--- |
-| **1. Konversi Tipe Data** | `id_a` (Integer) | `1045` | Teks `"1045"` diubah menggunakan `stoi` menjadi bilangan bulat. |
-| | `id_b` (Integer) | `890` | Teks `"890"` diubah menjadi bilangan bulat. |
-| | `w` (Float) | `0.45` | Teks `"0.45"` diubah menggunakan `parse_weight` menjadi desimal. |
-| **2. Pendaftaran ID A** | `map_index[1045]` | `0` | Komputer mengecek kamus. Karena ID 1045 belum ada, ia didaftarkan sebagai **Indeks 0**. Nilai `N` bertambah menjadi 1. |
-| | `reverse_map` | `[1045]` | Komputer mengingat bahwa Indeks 0 adalah milik ID 1045 untuk diekspor nanti. |
-| **3. Pendaftaran ID B** | `map_index[890]` | `1` | ID 890 belum ada di kamus, maka ia didaftarkan sebagai **Indeks 1**. Nilai `N` bertambah menjadi 2. |
-| | `reverse_map` | `[1045, 890]` | Komputer mengingat bahwa Indeks 1 adalah milik ID 890. |
-| **4. Masuk ke Keranjang** | `temp_edges.push_back` | `{0, 1, 0.45}` | Baris data sukses masuk ke dalam array penampungan sementara menggunakan wujud indeks matriksnya, bukan ID aslinya. |
+| **1. Konversi Tipe Data** | `id_a` (Integer) | `101` | Teks `"101"` diubah menggunakan `stoi` menjadi bilangan bulat. |
+| | `id_b` (Integer) | `101` | Teks `"101"` diubah menjadi bilangan bulat. |
+| | `w` (Float) | `1.0` | Teks `"1.0"` diubah menggunakan `parse_weight` menjadi desimal. |
+| **2. Pendaftaran ID A** | `map_index[101]` | `0` | Komputer mengecek kamus. Karena ID 101 belum ada, ia didaftarkan sebagai **Indeks 0**. Nilai `N` bertambah menjadi 1. |
+| | `reverse_map` | `[101]` | Komputer mengingat bahwa Indeks 0 adalah milik ID 101 untuk diekspor nanti. |
+| **3. Pendaftaran ID B** | `map_index[101]` | `0` | ID 101 sudah terdaftar sebagai **Indeks 0**. Nilai `N` tidak bertambah. |
+| | `reverse_map` | `[101]` | Memori tidak berubah. |
+| **4. Masuk ke Keranjang** | `temp_edges.push_back` | `{0, 0, 1.0}` | Baris data sukses masuk ke dalam array penampungan sementara menggunakan wujud indeks matriksnya, bukan ID aslinya. |
 
 Berkat proses pemetaan ini, komputer GPU terbebas dari keharusan membuat matriks raksasa kosong hanya untuk menyesuaikan dengan ID produk yang melompat-lompat. Matriks dipastikan selalu rapat dan padat, mulai dari indeks `0` sampai jumlah produk unik terakhir.
 
@@ -154,43 +158,43 @@ Setelah seluruh data masuk ke dalam keranjang `temp_edges`, data tersebut masih 
 ---
 
 **Simulasi Visualisasi 1: Pencatatan Data ke 3 Array (Histogram)**
-Anggaplah kita memiliki 3 produk (N = 3) dan data `temp_edges` kita yang sudah diurutkan berisi 3 koneksi: 
-1. `c = 0`, `r = 1`, `w = 0.5`
-2. `c = 0`, `r = 2`, `w = 0.9`
-3. `c = 1`, `r = 0`, `w = 0.4`
+Anggaplah kita memproses 6 baris koneksi hasil pemetaan dari tabel Edgelist di atas. 
+1. `c = 0`, `r = 0`, `w = 1.0` (Self-Loop Produk 101)
+2. `c = 0`, `r = 1`, `w = 0.5`
+3. `c = 0`, `r = 2`, `w = 0.9` ... dan seterusnya.
 
-Berikut adalah proses pengisian data ke dalam memori saat *looping* pertama berjalan:
+Berikut adalah proses pengisian data ke dalam memori saat *looping* pertama berjalan (menampilkan 3 putaran pertama):
 
 | Tahap Iterasi | Data yang Dibaca (`e`) | `h_col_ptr` (Jumlah per Kolom) | `h_row_idx` (Daftar Baris) | `h_val` (Daftar Bobot) |
 | :--- | :--- | :--- | :--- | :--- |
 | **Kondisi Awal** | - | `[0, 0, 0, 0]` | `[]` | `[]` |
-| **Putaran 1** | Kolom `0`, Baris `1`, Bobot `0.5` | `[0, 1, 0, 0]` *(Indeks ke-1 bertambah)* | `[1]` | `[0.5]` |
-| **Putaran 2** | Kolom `0`, Baris `2`, Bobot `0.9` | `[0, 2, 0, 0]` *(Indeks ke-1 bertambah)* | `[1, 2]` | `[0.5, 0.9]` |
-| **Putaran 3** | Kolom `1`, Baris `0`, Bobot `0.4` | `[0, 2, 1, 0]` *(Indeks ke-2 bertambah)* | `[1, 2, 0]` | `[0.5, 0.9, 0.4]` |
+| **Putaran 1** | Kolom `0`, Baris `0`, Bobot `1.0` | `[0, 1, 0, 0]` *(Indeks ke-1 bertambah)* | `[0]` | `[1.0]` |
+| **Putaran 2** | Kolom `0`, Baris `1`, Bobot `0.5` | `[0, 2, 0, 0]` *(Indeks ke-1 bertambah)* | `[0, 1]` | `[1.0, 0.5]` |
+| **Putaran 3** | Kolom `0`, Baris `2`, Bobot `0.9` | `[0, 3, 0, 0]` *(Indeks ke-1 bertambah)* | `[0, 1, 2]` | `[1.0, 0.5, 0.9]` |
+
+*Setelah keenam data masuk, `h_col_ptr` akan berisi `[0, 3, 2, 1]` yang mewakili jumlah koneksi di masing-masing kolom.*
 
 ---
 
 **Simulasi Visualisasi 2: Perubahan `h_col_ptr` (Prefix Sum)**
-Array `h_row_idx` dan `h_val` sudah selesai diisi. Kini, program mengeksekusi *looping* kedua untuk menjumlahkan `h_col_ptr` secara beruntun agar nilainya berubah menjadi titik koordinat memori.
+Array `h_row_idx` dan `h_val` sudah selesai diisi penuh. Kini, program mengeksekusi *looping* kedua untuk menjumlahkan `h_col_ptr` secara beruntun agar nilainya berubah menjadi titik koordinat memori batas array.
 
 | Tahap Eksekusi | Isi Array `h_col_ptr` | Penjelasan |
 | :--- | :--- | :--- |
-| **Selesai Histogram** | `[0, 2, 1, 0]` | Kolom 0 ada 2 data, Kolom 1 ada 1 data, Kolom 2 kosong. |
-| **Prefix Sum (i = 0)** | `[0, 2, 1, 0]` | Kotak ke-1 dijumlahkan dengan Kotak ke-0 (2 + 0 = 2). |
-| **Prefix Sum (i = 1)** | `[0, 2, 3, 0]` | Kotak ke-2 dijumlahkan dengan Kotak ke-1 (1 + 2 = 3). |
-| **Prefix Sum (i = 2)** | `[0, 2, 3, 3]` | Kotak ke-3 dijumlahkan dengan Kotak ke-2 (0 + 3 = 3). |
+| **Selesai Histogram** | `[0, 3, 2, 1]` | Kolom 0 ada 3 data, Kolom 1 ada 2 data, Kolom 2 ada 1 data. |
+| **Prefix Sum (i = 0)** | `[0, 3, 2, 1]` | Kotak ke-1 dijumlahkan dengan Kotak ke-0 (3 + 0 = 3). |
+| **Prefix Sum (i = 1)** | `[0, 3, 5, 1]` | Kotak ke-2 dijumlahkan dengan Kotak ke-1 (2 + 3 = 5). |
+| **Prefix Sum (i = 2)** | `[0, 3, 5, 6]` | Kotak ke-3 dijumlahkan dengan Kotak ke-2 (1 + 5 = 6). |
 
 ---
 
-
-
 **Hasil Akhir Format CSC:**
 Dari serangkaian proses simulasi di atas, wujud akhir format matriks CSC yang tercipta dan siap dikirim untuk diproses oleh GPU NVIDIA adalah sebagai berikut:
-* `h_col_ptr` = **`{0, 2, 3, 3}`**
-* `h_row_idx` = **`{1, 2, 0}`**
-* `h_val`     = **`{0.5, 0.9, 0.4}`**
+* `h_col_ptr` = **`{0, 3, 5, 6}`**
+* `h_row_idx` = **`{0, 1, 2, 0, 1, 2}`**
+* `h_val`     = **`{1.0, 0.5, 0.9, 0.4, 1.0, 1.0}`**
 
-*(Dari kotak memori paling ujung `h_col_ptr[3]`, secara otomatis didapatkan total **NNZ = 3** koneksi).*
+*(Dari kotak memori paling ujung `h_col_ptr[3]`, secara otomatis didapatkan total **NNZ = 6** koneksi).*
 
 ### TAHAP 2: Alokasi Memori GPU dan Persiapan Pasukan Komputasi (CUDA)
 
@@ -206,6 +210,10 @@ Setelah matriks CSC terbentuk rapi di memori utama komputer (RAM/Host), tahap se
     CHECK_CUDA(cudaMalloc(&d_val, nnz * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_nnz_per_col, N * sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_chaos, N * sizeof(float)));
+    
+    CHECK_CUDA(cudaMemcpy(d_col_ptr, h_col_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_row_idx, h_row_idx.data(), nnz * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_val, h_val.data(), nnz * sizeof(float), cudaMemcpyHostToDevice));
 ```
 
 **1. Pemesanan Kavling Memori GPU (`cudaMalloc`)**
@@ -215,12 +223,6 @@ Fungsi `cudaMalloc` bertugas mengalokasikan ruang fisik di memori VRAM GPU secar
 * `d_row_idx` dan `d_val`: Diberi ruang sebesar `nnz` (total jumlah koneksi valid).
 * `d_nnz_per_col` dan `d_chaos`: Disiapkan sebagai memori kosong untuk menampung laporan hasil *pruning* dan nilai konvergensi pada Tahap 3 nanti.
 
-```cpp
-    CHECK_CUDA(cudaMemcpy(d_col_ptr, h_col_ptr.data(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_row_idx, h_row_idx.data(), nnz * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_val, h_val.data(), nnz * sizeof(float), cudaMemcpyHostToDevice));
-```
-
 **2. Transfer Data Lintas Perangkat (`cudaMemcpy`)**
 Ini adalah momen krusial saat array CSC melintasi perangkat keras komputer. Perintah `cudaMemcpyHostToDevice` secara eksplisit menyuruh CPU untuk menyalin isi dari `h_col_ptr`, `h_row_idx`, dan `h_val` menuju alamat memori `d_` yang sudah dipesan di GPU sebelumnya.
 
@@ -228,31 +230,29 @@ Ini adalah momen krusial saat array CSC melintasi perangkat keras komputer. Peri
     // Setup cuSPARSE
     cusparseHandle_t handle;
     CHECK_CUSPARSE(cusparseCreate(&handle));
+    
+    int threads1D = 256;
+    int blocks1D = (N + threads1D - 1) / threads1D;
+
+    // Normalisasi Awal
+    initial_normalize_kernel<<<blocks1D, threads1D>>>(N, d_col_ptr, d_val);
+    CHECK_CUDA(cudaDeviceSynchronize());
 ```
 
 **3. Inisialisasi Pustaka cuSPARSE**
 Karena algoritma ini memanfaatkan fungsi bawaan dari NVIDIA untuk perkalian matriks tingkat lanjut, kita wajib membuat sebuah *Handle*. `cusparseHandle_t` dapat diibaratkan sebagai "Sesi Sinyal Utama" yang akan selalu dipanggil setiap kali kita menyuruh GPU melakukan operasi matriks *Sparse*.
-
-```cpp
-    int threads1D = 256;
-    int blocks1D = (N + threads1D - 1) / threads1D;
-```
 
 **4. Formasi Pasukan Pekerja GPU (Threads & Blocks)**
 GPU beroperasi dengan membagi pekerjaan kepada ribuan pekerja (Thread) yang dikelompokkan ke dalam regu (Block). 
 * **`threads1D = 256`**: Setiap 1 regu diatur agar berisi tepat 256 pekerja.
 * **Rumus Pembulatan `blocks1D`**: Agar seluruh produk ($N$) mendapat kebagian pekerja, digunakan rumus `(N + 256 - 1) / 256`. Jika total produk misalnya 10.000, maka akan dibentuk 40 regu kerja (total 10.240 pekerja). Kelebihan 240 pekerja nantinya akan diam / tidak memproses apa-apa.
 
-```cpp
-    // Normalisasi Awal
-    initial_normalize_kernel<<<blocks1D, threads1D>>>(N, d_col_ptr, d_val);
-    CHECK_CUDA(cudaDeviceSynchronize());
-```
-
 **5. Eksekusi Paralel (Kernel Launch)**
 Tanda `<<< ... >>>` adalah aba-aba yang menyuruh ribuan pekerja GPU (sesuai formasi `blocks1D` dan `threads1D`) untuk menyerbu fungsi `initial_normalize_kernel` secara serentak. 
 Di dalam fungsi ini, setiap pekerja memegang tepat 1 Kolom Produk. Mereka bertugas menjumlahkan total bobot (*weight*) di kolom tersebut, lalu membagi setiap nilai dengan totalnya. Hasilnya, matriks berubah wujud menjadi **Matriks Markov (Matriks Stokastik)** di mana jumlah setiap kolom pasti sama dengan 1.0. 
 Perintah `cudaDeviceSynchronize()` memastikan CPU diam menunggu sampai seluruh pekerja GPU selesai menormalisasi data.
+
+---
 
 **5B. Penjelasan dan Simulasi Kernel Normalisasi Awal (`initial_normalize_kernel`)**
 
@@ -289,39 +289,28 @@ Fungsi berlabel `__global__` ini adalah kode yang dieksekusi murni di dalam inti
 
 **Simulasi Visualisasi Eksekusi Paralel GPU (Normalisasi)**
 
-Mari kita gunakan hasil format CSC dari Tahap 6 sebelumnya: 
-* `col_ptr` = `{0, 2, 3, 3}` (Penunjuk batas)
-* `val` = `{0.5, 0.9, 0.4}` (Bobot asli)
+Mari kita gunakan hasil format CSC sebelumnya: 
+* `col_ptr` = `{0, 3, 5, 6}`
+* `val` = `{1.0, 0.5, 0.9, 0.4, 1.0, 1.0}`
 * Jumlah Produk `N = 3`.
 
 Di dalam GPU, **Thread 0, Thread 1, dan Thread 2 akan bekerja secara serentak (bersamaan) di detik yang sama.** Berikut adalah simulasi apa yang terjadi di dalam otak tiap-tiap pekerja GPU:
 
 | Tindakan | Thread 0 (Menangani Kolom 0) | Thread 1 (Menangani Kolom 1) | Thread 2 (Menangani Kolom 2) |
 | :--- | :--- | :--- | :--- |
-| **1. Baca Batas Awal (`start`)** | `col_ptr[0]` ➔ Indeks **`0`** | `col_ptr[1]` ➔ Indeks **`2`** | `col_ptr[2]` ➔ Indeks **`3`** |
-| **2. Baca Batas Akhir (`end`)** | `col_ptr[1]` ➔ Indeks **`2`** | `col_ptr[2]` ➔ Indeks **`3`** | `col_ptr[3]` ➔ Indeks **`3`** |
-| **3. Cari Nilai di Array `val`** | Membaca indeks ke-`0` dan `1` <br> *(Isi: `0.5` dan `0.9`)* | Membaca indeks ke-`2` <br> *(Isi: `0.4`)* | Membaca indeks ke-`3` sampai `3` <br> *(Kosong/Tidak ada data)* |
-| **4. Hitung Total (`sum`)** | `0.5 + 0.9` = **`1.4`** | `0.4` = **`0.4`** | Tidak ada proses = **`0.0`** |
-| **5. Operasi Pembagian (`val[i] /= sum`)** | Indeks 0: `0.5 / 1.4` = **`0.357`** <br> Indeks 1: `0.9 / 1.4` = **`0.643`** | Indeks 2: `0.4 / 0.4` = **`1.0`** | Syarat `sum > 0.0` gagal. <br> Diabaikan. |
+| **1. Baca Batas Awal (`start`)** | `col_ptr[0]` ➔ Indeks **`0`** | `col_ptr[1]` ➔ Indeks **`3`** | `col_ptr[2]` ➔ Indeks **`5`** |
+| **2. Baca Batas Akhir (`end`)** | `col_ptr[1]` ➔ Indeks **`3`** | `col_ptr[2]` ➔ Indeks **`5`** | `col_ptr[3]` ➔ Indeks **`6`** |
+| **3. Cari Nilai di Array `val`** | Membaca indeks `0, 1, 2` <br> *(Isi: `1.0`, `0.5`, `0.9`)* | Membaca indeks `3, 4` <br> *(Isi: `0.4`, `1.0`)* | Membaca indeks `5` <br> *(Isi: `1.0`)* |
+| **4. Hitung Total (`sum`)** | `1.0 + 0.5 + 0.9` = **`2.4`** | `0.4 + 1.0` = **`1.4`** | `1.0` = **`1.0`** |
+| **5. Operasi Pembagian (`val[i] /= sum`)** | Indeks 0: `1.0 / 2.4` = **`0.417`** <br> Indeks 1: `0.5 / 2.4` = **`0.208`** <br> Indeks 2: `0.9 / 2.4` = **`0.375`** | Indeks 3: `0.4 / 1.4` = **`0.286`** <br> Indeks 4: `1.0 / 1.4` = **`0.714`** | Indeks 5: `1.0 / 1.0` = **`1.0`** |
 
 **Hasil Akhir di Memori GPU (`d_val`):**
 Setelah ketiga *Thread* selesai bekerja secara paralel, array nilai di memori GPU otomatis diperbarui menjadi:
-* `val` baru = **`{0.357, 0.643, 1.0}`**
+* `val` baru = **`{0.417, 0.208, 0.375, 0.286, 0.714, 1.0}`**
 
 *(Kini setiap kolom secara matematis sudah valid menjadi probabilitas stokastik).*
 
-```cpp
-    vector<float> h_chaos(N, 0.0f);
-    vector<int> h_nnz_per_col(N, 0);
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start); cudaEventCreate(&stop);
-    cudaEventRecord(start);
-```
-
-**6. Wadah Laporan & Stopwatch Internal GPU**
-* Vektor `h_chaos` dan `h_nnz_per_col` disiapkan di RAM sebagai keranjang kosong penerima laporan dari GPU di setiap akhir iterasi.
-* `cudaEvent_t` digunakan karena fungsi waktu bawaan CPU (seperti `time.h`) tidak akurat untuk mengukur kecepatan GPU. Perintah `cudaEventRecord(start)` ditekan tepat 1 milidetik sebelum Tahap 3 (Iterasi MCL) dimulai, untuk mengukur kecepatan konvergensi secara absolut.
+---
 
 ### TAHAP 3: Iterasi MCL Sparse (Ekspansi dan Perkalian cuSPARSE)
 
@@ -429,24 +418,23 @@ Setelah baris kodingan ini terlewati, struktur "bangunan" Matriks C yang memuat 
 
 **Simulasi Logika Perkalian Matriks Sparse di dalam `compute`**
 Berkat trik ilusi memori yang kita lakukan di awal, eksekusi fisik perkalian di dalam memori tetap berjalan mulus menggunakan algoritma berbasis "Kolom memanggil Kolom". 
-Mari kita gunakan data 3 Produk ($N = 3$) yang nilainya **sudah dinormalisasi** dari tahap sebelumnya: 
-* `col_ptr` = `[0, 2, 3, 3]`
-* `row_idx` = `[1, 2, 0]`
-* `val` = `[0.357, 0.643, 1.0]`
+Mari kita gunakan data 3 Produk ($N = 3$) yang nilainya **sudah dinormalisasi lengkap dengan Self-Loop** dari tahap sebelumnya: 
+* `col_ptr` = `[0, 3, 5, 6]`
+* `row_idx` = `[0, 1, 2, 0, 1, 2]`
+* `val` = `[0.417, 0.208, 0.375, 0.286, 0.714, 1.0]`
 
-Berikut adalah proses internal fisik yang terjadi pada data array saat mencari koneksi baru untuk mengisi Matriks C:
+Berikut adalah kalkulasi internal fisik yang terjadi saat mencari koneksi baru untuk mengisi Matriks C:
 
-| Target Eksekusi | Apa yang Dicari pada Data Array Memori | Eksekusi Perhitungan & Hasil |
-| :--- | :--- | :--- |
-| **Mencari Isi Kolom 0** | Cek Matriks Kanan di Kolom 0. Ada data di Baris **1** (0.357) dan Baris **2** (0.643). | • Panggil Kolom **1** Kiri: Ketemu data Baris 0 (1.0). <br>➔ Dikali: `0.357 * 1.0` = **`0.357`** <br>• Panggil Kolom **2** Kiri: Kosong. <br>➔ **Hasil Kolom 0:** Tercipta 1 koneksi di Baris 0 (0.357). |
-| **Mencari Isi Kolom 1** | Cek Matriks Kanan di Kolom 1. Ada data di Baris **0** (1.0). | • Panggil Kolom **0** Kiri: Ketemu data Baris 1 (0.357) dan Baris 2 (0.643). <br>➔ Dikali: `1.0 * 0.357` = **`0.357`** dan `1.0 * 0.643` = **`0.643`** <br>➔ **Hasil Kolom 1:** Tercipta 2 koneksi di Baris 1 (0.357) dan Baris 2 (0.643). |
-| **Mencari Isi Kolom 2** | Cek Matriks Kanan di Kolom 2. Indeks awal dan akhir sama (batas 3 sampai 3). | • Karena di Matriks Kanan kosong, GPU otomatis melompati proses ini. <br>➔ **Hasil Kolom 2:** Tetap kosong (0 koneksi). |
+| Target Eksekusi Kolom C ($A \times A$) | Eksekusi Perhitungan & Hasil |
+| :--- | :--- |
+| **Mencari Isi Kolom 0** | • **Baris 0:** $(0.417 \times 0.417) + (0.286 \times 0.208) + (0 \times 0.375)$ = **`0.233`** <br>• **Baris 1:** $(0.208 \times 0.417) + (0.714 \times 0.208) + (0 \times 0.375)$ = **`0.235`** <br>• **Baris 2:** $(0.375 \times 0.417) + (0 \times 0.208) + (1.0 \times 0.375)$ = **`0.531`** |
+| **Mencari Isi Kolom 1** | • **Baris 0:** $(0.417 \times 0.286) + (0.286 \times 0.714) + (0 \times 0)$ = **`0.323`** <br>• **Baris 1:** $(0.208 \times 0.286) + (0.714 \times 0.714) + (0 \times 0)$ = **`0.569`** <br>• **Baris 2:** $(0.375 \times 0.286) + (0 \times 0.714) + (1.0 \times 0)$ = **`0.107`** |
+| **Mencari Isi Kolom 2** | • **Baris 2:** $(1.0 \times 1.0)$ = **`1.0`** *(Baris 0 dan 1 tidak memiliki koneksi awal sehingga nilainya 0)* |
 
 **Hasil Akhir Matriks C (Disimpan dalam Format CSC)**
-Dari simulasi perkalian tersebut, Matriks C kini memegang total `C_nnz = 3` koneksi baru. Program secara otomatis menyusun dan menyimpan wujud fisik Matriks C ke dalam 3 buah array CSC yang berjejer rapi di memori GPU:
-* `C_col_ptr` = **`[0, 1, 3, 3]`** *(Dari batas 0 ke 1 ada 1 data. Batas 1 ke 3 ada 2 data. Batas 3 ke 3 kosong)*
-* `C_row_idx` = **`[0, 1, 2]`** *(Baris 0 milik Kolom 0. Baris 1 dan 2 milik Kolom 1)*
-* `C_val` = **`[0.357, 0.357, 0.643]`** *(Hasil angka perkalian sesuai urutan baris)*
+Dari simulasi perkalian tersebut, Matriks C memegang total `C_nnz = 7` koneksi. Program secara otomatis menyusun dan menyimpan wujud fisik Matriks C ke dalam 3 buah array CSC yang berjejer rapi di memori GPU:
+* `C_col_ptr` = **`[0, 3, 6, 7]`** * `C_row_idx` = **`[0, 1, 2, 0, 1, 2, 2]`**
+* `C_val` = **`[0.233, 0.235, 0.531, 0.323, 0.569, 0.107, 1.0]`**
 
 ---
 
@@ -490,21 +478,13 @@ Fungsi ini bertugas menginterogasi GPU mengenai dimensi matriks hasil.
 | `&C_cols_64` | Tempat GPU menuliskan angka tunggal jumlah kolom (pasti senilai $N$). |
 | `&C_nnz_64` | **Kunci Utama:** Tempat GPU menuliskan angka pasti total koneksi (NNZ) hasil Ekspansi. |
 
-*(Menggunakan simulasi 3 produk dari tahap sebelumnya, GPU akan merespons dengan mengisi variabel `C_nnz_64` dengan angka bulat **`3`**. Angka ini kemudian dikonversi menjadi integer standar 32-bit di variabel `C_nnz`)*.
+*(Menggunakan simulasi 3 produk dari tahap sebelumnya, GPU akan merespons dengan mengisi variabel `C_nnz_64` dengan angka bulat **`7`**. Angka ini kemudian dikonversi menjadi integer standar 32-bit di variabel `C_nnz`)*.
 
 **B. Alokasi Memori Permanen (`cudaMalloc`)**
-Karena CPU sekarang sudah memegang angka pasti jumlah koneksi yang terbentuk (`C_nnz = 3`), CPU dengan yakin menyewa lahan memori yang presisi (tidak kurang dan tidak mubazir):
-* `d_C_row_idx` disewa sebesar 3 kotak bertipe *Integer* (untuk menyimpan `[0, 1, 2]`).
-* `d_C_val` disewa sebesar 3 kotak bertipe *Float* (untuk menyimpan `[0.357, 0.357, 0.643]`).
+Karena CPU sekarang sudah memegang angka pasti jumlah koneksi yang terbentuk (`C_nnz = 7`), CPU dengan yakin menyewa lahan memori yang presisi (tidak kurang dan tidak mubazir) untuk `d_C_row_idx` dan `d_C_val`.
 
 **C. Memperbarui Identitas Matriks C (`cusparseCsrSetPointers`)**
-Di awal proyek, array baris dan nilai pada Matriks C kita isi dengan `nullptr` (kosong). Kini kita harus memperbaruinya.
-| Parameter | Logika & Penjelasan |
-| :--- | :--- |
-| `matC` | "KTP" Matriks C yang akan di-*update*. |
-| `d_C_col_ptr` | Memori batas kolom (ukuran $N+1$) yang sudah dialokasikan sejak awal. |
-| `d_C_row_idx` | Memori indeks baris baru yang ukurannya sudah menyesuaikan nilai `C_nnz`. |
-| `d_C_val` | Memori nilai bobot probabilitas baru yang juga sudah menyesuaikan nilai `C_nnz`. |
+Di awal proyek, array baris dan nilai pada Matriks C kita isi dengan `nullptr` (kosong). Kini kita harus memperbaruinya dengan memori yang baru disewa.
 
 **D. Pemindahan Data Final (`cusparseSpGEMM_copy`)**
 Ini adalah gong penutup operasi *Sparse*. Seluruh isi parameter di dalam kurung fungsi ini **100% sama persis** dengan fungsi `workEstimation` dan `compute` sebelumnya.
@@ -549,13 +529,13 @@ Berbeda dengan tahap sebelumnya yang bergantung pada pustaka cuSPARSE (*Black Bo
 Kita meluncurkan kernel dengan konfigurasi grid 1-Dimensi (`blocks1D`, `threads1D`). Perintah `cudaDeviceSynchronize()` memastikan CPU menunggu hingga seluruh *Thread* GPU selesai bekerja sebelum melanjutkan ke baris kodingan berikutnya.
 
 Berikut adalah rincian data yang kita kirimkan ke dalam mesin GPU:
-*   **`N`**: Total jumlah produk.
-*   **`d_C_col_ptr`**: Array batas kolom Matriks C (digunakan *Thread* untuk mengetahui dari indeks mana sampai mana ia harus membaca data di kolom tugasnya).
-*   **`d_C_val`**: Array nilai bobot desimal probabilitas dari Matriks C. (Kita tidak mengirimkan `d_C_row_idx` karena operasi matematika ini tidak memedulikan arah koneksi, hanya peduli pada manipulasi bobot nilainya).
-*   **`inflation_p`**: Parameter eksponen/pangkat (biasanya disetel `2.0`).
-*   **`prune_threshold`**: Batas bawah pemangkasan (misal `0.15`). Koneksi dengan bobot di bawah ini akan dihapus.
-*   **`d_nnz_per_col`**: Array penampung baru untuk mencatat jumlah koneksi yang selamat (*valid*) di setiap kolom setelah di-pruning.
-*   **`d_chaos`**: Array penampung baru untuk mencatat tingkat kekonvergenan (Chaos) dari tiap kolom.
+* **`N`**: Total jumlah produk.
+* **`d_C_col_ptr`**: Array batas kolom Matriks C (digunakan *Thread* untuk mengetahui dari indeks mana sampai mana ia harus membaca data di kolom tugasnya).
+* **`d_C_val`**: Array nilai bobot desimal probabilitas dari Matriks C. (Kita tidak mengirimkan `d_C_row_idx` karena operasi matematika ini tidak memedulikan arah koneksi, hanya peduli pada manipulasi bobot nilainya).
+* **`inflation_p`**: Parameter eksponen/pangkat (`1.3`).
+* **`prune_threshold`**: Batas bawah pemangkasan (`1e-3` atau `0.001`). Koneksi dengan bobot di bawah ini akan dihapus.
+* **`d_nnz_per_col`**: Array penampung baru untuk mencatat jumlah koneksi yang selamat (*valid*) di setiap kolom setelah di-pruning.
+* **`d_chaos`**: Array penampung baru untuk mencatat tingkat kekonvergenan (Chaos) dari tiap kolom.
 
 ---
 
@@ -606,29 +586,29 @@ Keempat proses matematika ini (Inflasi, Prune, Normalisasi, dan Chaos) sengaja d
 
 **3. Simulasi Eksekusi Memori per *Thread***
 
-Mari kita simulasikan bagaimana *kernel* ini mengeksekusi array Matriks C hasil perhitungan SpGEMM sebelumnya.
-*   **Data Awal Matriks C:**
-    *   Total Produk (`N`) = 3
-    *   `col_ptr` = `[0, 1, 3, 3]`
-    *   `val` = `[0.357, 0.357, 0.643]`
-*   **Aturan yang Disetel:** Pangkat Inflasi (`power`) = **2.0** | Batas Prune (`threshold`) = **0.15**
+> **Catatan Simulasi:** Untuk mempercepat contoh perhitungan agar dapat langsung melihat bentuk matriks konvergen sempurna di akhir iterasi, pada simulasi *Kernel* di bawah ini kita akan menggunakan **Pangkat Inflasi (`power`) = 2.0** dan **Batas Prune (`threshold`) = 0.15**.
 
-Karena $N = 3$, GPU menugaskan 3 buah *Thread* (Thread 0, 1, dan 2) untuk berjalan secara bersamaan/paralel. Berikut adalah proses yang terjadi di dalam masing-masing *Thread*:
+Mari kita simulasikan bagaimana *kernel* ini mengeksekusi array Matriks C hasil perhitungan SpGEMM sebelumnya.
+* **Data Awal Matriks C (Dari Tahap 3):**
+    * `col_ptr` = `[0, 3, 6, 7]`
+    * `val` = `[0.233, 0.235, 0.531, 0.323, 0.569, 0.107, 1.0]`
+
+Karena $N = 3$, GPU menugaskan 3 buah *Thread* (Thread 0, 1, dan 2) untuk berjalan secara bersamaan/paralel. Berikut adalah proses matematika yang terjadi di masing-masing *Thread*:
 
 | Pekerja | Data yang Dibaca (Berdasarkan `col_ptr`) | Pass 1: Inflasi & Prune | Pass 2: Normalisasi & Hitung Chaos | Hasil yang Ditulis ke Memori GPU |
 | :--- | :--- | :--- | :--- | :--- |
-| **Thread 0**<br>*(Target: Kolom 0)* | Membaca indeks `0` sampai `1`.<br>➔ Ditemukan data: **`0.357`** | **Inflasi:** $0.357^2 = 0.127$<br>**Prune:** Karena $0.127 < 0.15$, nilai dibunuh menjadi **`0.0`**.<br>**Catatan:** `valid_nnz = 0`, `sum = 0.0` | Karena `sum = 0.0`, tahap normalisasi dilewati otomatis.<br>**Chaos:** `max_val` ($0$) - `sum_sq` ($0$) = **`0.0`** | `val[0]` = **`0.0`**<br>`nnz_per_col[0]` = **`0`**<br>`chaos_arr[0]` = **`0.0`** |
-| **Thread 1**<br>*(Target: Kolom 1)* | Membaca indeks `1` sampai `3`.<br>➔ Data 1: **`0.357`**<br>➔ Data 2: **`0.643`** | **Data 1:** $0.357^2 = 0.127$ (Dibunuh jadi **`0.0`**)<br>**Data 2:** $0.643^2 = 0.413$ (Selamat karena $> 0.15$).<br>**Catatan:** `valid_nnz = 1`, `sum = 0.413` | **Data 1:** Lewat (karena sudah `0.0`)<br>**Data 2 (Normalisasi):** $0.413 / 0.413 =$ **`1.0`**<br>**Chaos:** `max_val` ($1.0$) - `sum_sq` ($1.0^2$) = **`0.0`** | `val[1]` = **`0.0`**<br>`val[2]` = **`1.0`**<br>`nnz_per_col[1]` = **`1`**<br>`chaos_arr[1]` = **`0.0`** |
-| **Thread 2**<br>*(Target: Kolom 2)* | Membaca indeks `3` sampai `3`.<br>➔ Tidak ada data (kosong). | Tidak ada operasi berjalan.<br>**Catatan:** `valid_nnz = 0`, `sum = 0.0` | Tahap ini dilewati otomatis.<br>**Chaos = `0.0`** | `nnz_per_col[2]` = **`0`**<br>`chaos_arr[2]` = **`0.0`** |
+| **Thread 0**<br>*(Target: Kolom 0)* | Membaca indeks `0, 1, 2`.<br>➔ Data: **`0.233, 0.235, 0.531`** | **Inflasi:** $0.233^2 = 0.054$ (`Dihapus jadi 0.0`)<br>$0.235^2 = 0.055$ (`Dihapus jadi 0.0`)<br>$0.531^2 = 0.282$ (`Selamat`)<br>**Catatan:** `valid_nnz = 1`, `sum = 0.282` | **Normalisasi:** Hanya indeks 2 yang tersisa.<br>$0.282 / 0.282 =$ **`1.0`**<br>**Chaos:** `max_val` ($1.0$) - `sum_sq` ($1.0^2$) = **`0.0`** | `val[0,1,2]` = **`[0.0, 0.0, 1.0]`**<br>`nnz_per_col[0]` = **`1`**<br>`chaos_arr[0]` = **`0.0`** |
+| **Thread 1**<br>*(Target: Kolom 1)* | Membaca indeks `3, 4, 5`.<br>➔ Data: **`0.323, 0.569, 0.107`** | **Inflasi:** $0.323^2 = 0.104$ (`Dihapus jadi 0.0`)<br>$0.569^2 = 0.324$ (`Selamat`)<br>$0.107^2 = 0.011$ (`Dihapus jadi 0.0`)<br>**Catatan:** `valid_nnz = 1`, `sum = 0.324` | **Normalisasi:** Hanya indeks 4 yang tersisa.<br>$0.324 / 0.324 =$ **`1.0`**<br>**Chaos:** `max_val` ($1.0$) - `sum_sq` ($1.0^2$) = **`0.0`** | `val[3,4,5]` = **`[0.0, 1.0, 0.0]`**<br>`nnz_per_col[1]` = **`1`**<br>`chaos_arr[1]` = **`0.0`** |
+| **Thread 2**<br>*(Target: Kolom 2)* | Membaca indeks `6`.<br>➔ Data: **`1.0`** | **Inflasi:** $1.0^2 = 1.0$ (`Selamat`)<br>**Catatan:** `valid_nnz = 1`, `sum = 1.0` | **Normalisasi:** $1.0 / 1.0 =$ **`1.0`**<br>**Chaos = `0.0`** | `val[6]` = **`[1.0]`**<br>`nnz_per_col[2]` = **`1`**<br>`chaos_arr[2]` = **`0.0`** |
 
 **Kondisi Akhir VRAM Setelah Eksekusi:**
 Setelah kernel ini selesai tersinkronisasi (`cudaDeviceSynchronize`), kondisi fisik memori Matriks C kita berubah drastis menjadi:
-1.  **`val`** (Bobot): Berubah dari `[0.357, 0.357, 0.643]` menjadi **`[0.0, 0.0, 1.0]`**.
-2.  **`nnz_per_col`** (Laporan Koneksi Selamat): Berisi **`[0, 1, 0]`**.
+1.  **`val`** (Bobot): Berubah menjadi **`[0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]`**.
+2.  **`nnz_per_col`** (Laporan Koneksi Selamat): Berisi **`[1, 1, 1]`**.
 3.  **`chaos_arr`** (Indikator Kekonvergenan): Berisi **`[0.0, 0.0, 0.0]`**.
 
 **Masalah Baru yang Muncul:**
-Terdapat konsekuensi matematis dari proses di atas. Array `val` kita sekarang dipenuhi oleh banyak angka **`0.0`**. Di dalam sistem Matriks *Sparse*, menyimpan memori untuk nilai nol murni adalah hal yang tabu dan membuang-buang kapasitas VRAM. Oleh sebab itu, tahapan selanjutnya yang harus kita lakukan adalah proses pemadatan data (*Compaction*) untuk menyapu bersih sampah nilai nol tersebut.
+Terdapat konsekuensi matematis dari proses di atas. Array `val` kita sekarang disisipi oleh banyak angka **`0.0`**. Di dalam sistem Matriks *Sparse*, menyimpan memori untuk nilai nol murni adalah hal yang tabu dan membuang-buang kapasitas VRAM. Oleh sebab itu, tahapan selanjutnya yang harus kita lakukan adalah proses pemadatan data (*Compaction*) untuk menyapu bersih sampah nilai nol tersebut.
 
 ### TAHAP 5A: Compaction (Pemadatan Memori Matriks Sparse) - Persiapan
 
@@ -679,24 +659,24 @@ Karena GPU tidak tahu letak batas-batas array yang baru, CPU mengirimkan kembali
 
 **Simulasi Pemadatan Memori (Berdasarkan Hasil Ekspansi Sebelumnya)**
 
-Mari kita teruskan data simulasi kita. Matriks C sebelumnya memiliki 3 produk (`N = 3`) dan awalnya memiliki 3 total koneksi (`NNZ = 3`). Setelah melewati tahap Inflasi & Prune, laporan sisa koneksi (`h_nnz_per_col`) yang ditarik ke CPU berisi array: **`[0, 1, 0]`**.
+Mari kita teruskan data simulasi kita. Matriks C sebelumnya memiliki 3 produk (`N = 3`) dan awalnya memiliki 7 total koneksi (`NNZ = 7`). Setelah melewati tahap Inflasi & Prune, laporan sisa koneksi (`h_nnz_per_col`) yang ditarik ke CPU berisi array: **`[1, 1, 1]`**.
 
 Berikut adalah proses bagaimana CPU merakit array batas (`col_ptr`) yang baru menggunakan rumus kumulatif (*Prefix Sum*):
 
 | Target Indeks | Sisa Koneksi Laporan | Rumus Matematika (Batas Lama + Laporan Baru) | Wujud Array `new_col_ptr` |
 | :--- | :--- | :--- | :--- |
 | **Indeks 0** (Awal) | - | Secara mutlak selalu dimulai dari angka `0`. | `[0]` |
-| **Indeks 1** (Kolom 0) | Ada **`0`** koneksi | Angka sebelumnya (`0`) + Laporan Kolom 0 (`0`) = **`0`** | `[0, 0]` |
-| **Indeks 2** (Kolom 1) | Ada **`1`** koneksi | Angka sebelumnya (`0`) + Laporan Kolom 1 (`1`) = **`1`** | `[0, 0, 1]` |
-| **Indeks 3** (Kolom 2) | Ada **`0`** koneksi | Angka sebelumnya (`1`) + Laporan Kolom 2 (`0`) = **`1`** | `[0, 0, 1, 1]` |
+| **Indeks 1** (Kolom 0) | Ada **`1`** koneksi | Angka sebelumnya (`0`) + Laporan Kolom 0 (`1`) = **`1`** | `[0, 1]` |
+| **Indeks 2** (Kolom 1) | Ada **`1`** koneksi | Angka sebelumnya (`1`) + Laporan Kolom 1 (`1`) = **`2`** | `[0, 1, 2]` |
+| **Indeks 3** (Kolom 2) | Ada **`1`** koneksi | Angka sebelumnya (`2`) + Laporan Kolom 2 (`1`) = **`3`** | `[0, 1, 2, 3]` |
 
 **Penghematan Ekstrem yang Terjadi:**
-Dari perhitungan di atas, didapatkan bahwa array batas yang baru adalah **`[0, 0, 1, 1]`**. 
-Angka paling ujung dari array tersebut adalah **`1`**. Angka ini diekstrak menjadi nilai total koneksi matriks (`new_nnz = 1`).
+Dari perhitungan di atas, didapatkan bahwa array batas yang baru adalah **`[0, 1, 2, 3]`**. 
+Angka paling ujung dari array tersebut adalah **`3`**. Angka ini diekstrak menjadi nilai total koneksi matriks (`new_nnz = 3`).
 
 Maka, saat tahap alokasi memori berjalan:
-* Array baris (`d_new_row_idx`) dan array bobot (`d_new_val`) yang baru, masing-masing **hanya disewa sebesar 1 buah kotak memori saja**. 
-* Bandingkan dengan Matriks C sebelum di-pruning yang memakan 3 kotak memori. Semakin besar graf Anda (misal jutaan koneksi), tahap *Compaction* ini akan menghemat bergiga-giga kapasitas VRAM di dalam GPU.
+* Array baris (`d_new_row_idx`) dan array bobot (`d_new_val`) yang baru, masing-masing **hanya disewa sebesar 3 buah kotak memori saja**. 
+* Bandingkan dengan Matriks C sebelum di-pruning yang memakan 7 kotak memori. Semakin besar graf Anda (misal jutaan koneksi), tahap *Compaction* ini akan menghemat bergiga-giga kapasitas VRAM di dalam GPU.
 
 Di akhir langkah ini, rumah memori yang baru dan efisien sudah berdiri di GPU. Namun, rumah tersebut masih kosong. Tahap selanjutnya adalah memindahkan secara fisik nilai-nilai yang selamat tersebut ke dalam struktur memori yang baru ini.
 
@@ -737,20 +717,20 @@ __global__ void compact_sparse_kernel(int N, const int* old_col_ptr, const int* 
 
 **Simulasi Eksekusi Pemindahan Memori per *Thread***
 Mari kita gunakan kondisi Matriks C kita yang penuh angka nol hasil *Pruning* sebelumnya:
-* **Rumah Lama:** `old_col_ptr` = `[0, 1, 3, 3]` | `old_val` = `[0.0, 0.0, 1.0]` | `old_row_idx` = `[0, 1, 2]`
-* **Rumah Baru (Kosong):** `new_col_ptr` = `[0, 0, 1, 1]` | `new_val` = `[ ]` (kapasitas 1) | `new_row_idx` = `[ ]` (kapasitas 1)
+* **Rumah Lama:** `old_col_ptr` = `[0, 3, 6, 7]` | `old_val` = `[0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]` | `old_row_idx` = `[0, 1, 2, 0, 1, 2, 2]`
+* **Rumah Baru (Kosong):** `new_col_ptr` = `[0, 1, 2, 3]` | `new_val` = `[ , , ]` (kapasitas 3) | `new_row_idx` = `[ , , ]` (kapasitas 3)
 
 Berikut adalah proses gotong royong para *Thread* GPU:
 
-| Pekerja GPU | 1. Membaca Batas Rumah Lama | 2. Membaca Posisi Taruh Baru (`new_idx`) | 3. Inspeksi dan Eksekusi Pemindahan Data |
+| Pekerja GPU | 1. Membaca Batas Rumah Lama | 2. Posisi Taruh Baru (`new_idx`) | 3. Inspeksi dan Eksekusi Pemindahan Data |
 | :--- | :--- | :--- | :--- |
-| **Thread 0**<br>*(Target: Kolom 0)* | Indeks `0` sampai `1` | `new_col_ptr[0]` = **`0`** | Mengecek `old_val[0]` (`0.0`). Karena ini sampah hasil *pruning*, dibiarkan saja. Tugas selesai. |
-| **Thread 1**<br>*(Target: Kolom 1)* | Indeks `1` sampai `3` | `new_col_ptr[1]` = **`0`** | • Cek `old_val[1]` (`0.0`). Diabaikan.<br>• Cek `old_val[2]` (`1.0`). Selamat!<br>➔ Disalin ke rumah baru: `new_val[0]` diisi **`1.0`**.<br>➔ Baris disalin: `new_row_idx[0]` diisi **`2`**.<br>➔ `new_idx` bergeser menjadi `1`. Tugas selesai. |
-| **Thread 2**<br>*(Target: Kolom 2)* | Indeks `3` sampai `3` | `new_col_ptr[2]` = **`1`** | Karena batas indeks awal dan akhir sama (`3`), artinya kolom ini kosong. Tugas selesai. |
+| **Thread 0**<br>*(Target: Kolom 0)* | Indeks `0` sampai `3` | `new_col_ptr[0]` = **`0`** | • Indeks 0 & 1 dibiarkan (`0.0`).<br>• Indeks 2 (`1.0`) dipindah ke `new_val[0]`.<br>➔ Baris disalin: `new_row_idx[0]` diisi **`2`**. Tugas selesai. |
+| **Thread 1**<br>*(Target: Kolom 1)* | Indeks `3` sampai `6` | `new_col_ptr[1]` = **`1`** | • Indeks 3 & 5 dibiarkan (`0.0`).<br>• Indeks 4 (`1.0`) dipindah ke `new_val[1]`.<br>➔ Baris disalin: `new_row_idx[1]` diisi **`1`**. Tugas selesai. |
+| **Thread 2**<br>*(Target: Kolom 2)* | Indeks `6` sampai `7` | `new_col_ptr[2]` = **`2`** | • Indeks 6 (`1.0`) dipindah ke `new_val[2]`.<br>➔ Baris disalin: `new_row_idx[2]` diisi **`2`**. Tugas selesai. |
 
 **Hasil Akhir di Memori VRAM:**
 Kini rumah baru tersebut telah terisi dengan sangat padat dan efisien tanpa ada celah angka `0.0`.
-`new_val` kini berisi `[1.0]` dan `new_row_idx` berisi `[2]`. Matriks ini kini siap digunakan untuk iterasi Ekspansi berikutnya!
+`new_val` kini berisi `[1.0, 1.0, 1.0]` dan `new_row_idx` berisi `[2, 1, 2]`. Matriks ini kini siap digunakan untuk iterasi Ekspansi berikutnya!
 
 ---
 
@@ -768,9 +748,9 @@ Setelah graf diotak-atik, CPU bertugas mengecek apakah susunan klaster antar-pro
         }
         cout << "Iterasi " << iter + 1 << " | NNZ Aktif: " << new_nnz << " | Global Chaos: " << global_chaos << endl;
 ```
-1.  **Tarik Laporan:** CPU menyuruh GPU mengirimkan buku catatan *Chaos* per kolom (`d_chaos`) ke memori komputer utama (`h_chaos`). Berdasarkan simulasi kita di Tahap 4, array ini berisi `[0.0, 0.0, 0.0]`.
+1.  **Tarik Laporan:** CPU menyuruh GPU mengirimkan buku catatan *Chaos* per kolom (`d_chaos`) ke memori komputer utama (`h_chaos`). Berdasarkan perhitungan *self-loop* di Tahap 4, array ini berisi `[0.0, 0.0, 0.0]`.
 2.  **Cari Nilai Maksimal:** CPU melakukan perulangan standar (`for`) untuk mencari nilai yang paling besar di dalam array tersebut. Nilai terbesar inilah yang dinobatkan sebagai **`global_chaos`**. Pada simulasi kita, nilai tertingginya adalah `0.0`.
-3.  **Cetak Progres:** CPU mencetak status terkini ke layar monitor agar Anda bisa memantau pergerakan algoritma (*"Iterasi 1 | NNZ Aktif: 1 | Global Chaos: 0"*).
+3.  **Cetak Progres:** CPU mencetak status terkini ke layar monitor agar Anda bisa memantau pergerakan algoritma (*"Iterasi 1 | NNZ Aktif: 3 | Global Chaos: 0"*).
 
 ---
 
@@ -806,7 +786,7 @@ Ini adalah tahap perputaran roda iterasi. Kita harus menghancurkan sisa-sisa per
 1.  **Penghancuran (Bulldozer `cudaFree`):** Array `d_col_ptr` (Matriks A awal yang lama) dan `d_C_col_ptr` (Matriks C hasil ekspansi yang boros) dihancurkan total bangunan dan memorinya dari VRAM. Kertas coretan mesin cuSPARSE (`dBuffer`) juga dibuang.
 2.  **Tukar Papan Nama (Handover Pointer):** Setelah bangunan lama dihancurkan, papan penunjuk jalan `d_col_ptr`, `d_row_idx`, dan `d_val` otomatis menjadi pengangguran. CPU lalu mengambil papan penunjuk jalan tersebut dan **menancapkannya tepat di depan lahan memori bangunan baru** milik `d_new_...` yang sudah padat tadi.
 3.  **Siklus Berputar:** Berkat pertukaran nama ini, ketika program berputar kembali ke Tahap 1, mesin GPU secara otomatis akan menggunakan bangunan yang baru ini sebagai dasar Matriks A tanpa perlu melakukan alokasi (`cudaMalloc`) ulang.
-4.  **Syarat Berhenti:** Jika `global_chaos` sudah menyentuh batas bawah toleransi (mendekati 0), berarti klaster sudah paten. Perintah `break` dieksekusi untuk memutus rantai perulangan (loop) secara paksa, mengakhiri siklus MCL.
+4.  **Syarat Berhenti:** Jika `global_chaos` sudah menyentuh batas bawah toleransi (`< 0.00001`), berarti klaster sudah paten. Perintah `break` dieksekusi untuk memutus rantai perulangan (loop) secara paksa, mengakhiri siklus MCL.
 
 ---
 
@@ -883,8 +863,6 @@ Ini adalah bagian puncak dari seluruh program. Setelah memori disalin kembali ke
 
 Algoritma *Markov Clustering* (MCL) mendefinisikan klaster melalui konsep **Attractor** (Pusat Tarikan). Sebuah produk akan bergabung ke dalam klaster milik produk lain jika nilai probabilitas akhirnya ke produk tersebut adalah yang paling dominan (maksimal). 
 
-
-
 **1. Proses Penerjemahan dan Ekstraksi Atribut**
 ```cpp
         for (int col = 0; col < N; ++col) {
@@ -928,13 +906,13 @@ Algoritma *Markov Clustering* (MCL) mendefinisikan klaster melalui konsep **Attr
 
 ---
 
-**Simulasi Pengisian File Berdasarkan Data Terakhir**
+**Simulasi Pengisian File Berdasarkan Data Terakhir (Konvergen Sempurna)**
 
-Kita lanjutkan data VRAM terakhir yang berhasil dipanen:
+Kita lanjutkan data VRAM terakhir yang berhasil dipanen berkat *self-loop*:
 * Total Produk `N` = 3.
-* `final_col_ptr` = `[0, 0, 1, 1]`
-* `final_row_idx` = `[2]`
-* `final_val` = `[1.0]`
+* `final_col_ptr` = `[0, 1, 2, 3]`
+* `final_row_idx` = `[2, 1, 2]`
+* `final_val` = `[1.0, 1.0, 1.0]`
 
 Mari kita asumsikan `reverse_map` kita adalah: 
 * Indeks `0` = **Produk A (ID: 101)**
@@ -945,35 +923,37 @@ Berikut adalah proses penerjemahan array tersebut secara fisik oleh CPU:
 
 | Eksekusi Kolom (Source) | Logika `start` & `end` di Array CSC | Iterasi Koneksi & Pencarian *Attractor* | Hasil yang Ditulis ke `file_attr.csv` |
 | :--- | :--- | :--- | :--- |
-| **Kolom 0** (Produk A) | `start` = `0`<br>`end` = `0` | Karena batas sama, *looping* koneksi dilewati otomatis. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
-| **Kolom 1** (Produk B) | `start` = `0`<br>`end` = `1` | Membaca indeks `0` pada memori:<br>• `row` = `2` (Produk C)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,102,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`102`**<br>Klaster ID: **`103`**<br>Status: **`Anggota`** (karena $1 \neq 2$). |
-| **Kolom 2** (Produk C) | `start` = `1`<br>`end` = `1` | Karena batas sama, *looping* koneksi dilewati. Tidak ada *Attractor* (`-1`). | Tidak ada data yang ditulis. |
+| **Kolom 0** (Produk A) | `start` = `0`<br>`end` = `1` | Membaca indeks `0` pada memori:<br>• `row` = `2` (Produk C)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,101,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`101`**<br>Klaster ID: **`103`**<br>Status: **`Anggota`** (karena $0 \neq 2$). |
+| **Kolom 1** (Produk B) | `start` = `1`<br>`end` = `2` | Membaca indeks `1` pada memori:<br>• `row` = `1` (Produk B)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`102,102,1.0`**<br>➔ *Attractor* ditemukan: Baris `1`. | ID Produk: **`102`**<br>Klaster ID: **`102`**<br>Status: **`Host`** (karena $1 == 1$). |
+| **Kolom 2** (Produk C) | `start` = `2`<br>`end` = `3` | Membaca indeks `2` pada memori:<br>• `row` = `2` (Produk C)<br>• `v` = `1.0`<br>➔ Ditulis ke `file_matrix`: **`103,103,1.0`**<br>➔ *Attractor* ditemukan: Baris `2`. | ID Produk: **`103`**<br>Klaster ID: **`103`**<br>Status: **`Host`** (karena $2 == 2$). |
 
-*(Catatan Simulasi: Pada kondisi graf riil yang sudah konvergen sempurna, Kolom 2 seharusnya menyisakan koneksi bernilai 1.0 ke dirinya sendiri (Baris 2) sehingga berstatus "Host". Tabel di atas murni melacak mutlak sisa angka dari pemangkasan simulasi kita sebelumnya).*
-
-**Visualisasi Wujud Matriks Akhir**
-Jika array CSC yang telah dipadatkan tersebut dibongkar kembali dan digambar layaknya matriks matematika normal (*Dense Matrix*), maka wujud struktur probabilitas akhir antar-produk di memori Anda adalah seperti ini:
+**Visualisasi Wujud Matriks Akhir (Konvergen Sempurna)**
+Jika array CSC yang telah dipadatkan tersebut dibongkar kembali dan digambar layaknya matriks matematika normal (*Dense Matrix*), maka wujud struktur probabilitas akhir antar-produk di memori Anda adalah persis seperti teori graf ideal:
 
 | Target Aliran Probabilitas (Baris) \ Sumber (Kolom) | Produk A (ID: 101) | Produk B (ID: 102) | Produk C (ID: 103) |
 | :--- | :--- | :--- | :--- |
 | **Produk A (ID: 101)** | `0.0` | `0.0` | `0.0` |
-| **Produk B (ID: 102)** | `0.0` | `0.0` | `0.0` |
-| **Produk C (ID: 103)** | `0.0` | **`1.0`** | `0.0` |
+| **Produk B (ID: 102)** | `0.0` | **`1.0`** | `0.0` |
+| **Produk C (ID: 103)** | **`1.0`** | `0.0` | **`1.0`** |
 
-> *Cara membacanya: Lihat kolom Produk B. Produk B menyerahkan 100% probabilitasnya (1.0) ke arah Produk C. Inilah bukti matematis bahwa Produk B telah resmi menjadi anggota dari klaster yang dipimpin oleh Produk C.*
+> *Cara membacanya: Lihat kolom Produk A. Produk A menyerahkan 100% probabilitasnya (1.0) ke arah Produk C (Baris 2). Inilah bukti matematis bahwa Produk A telah resmi menjadi Anggota dari klaster yang dipimpin oleh Produk C. Sementara Produk B dan Produk C menunjuk dirinya sendiri, sehingga mereka resmi menjadi Host bagi klasternya masing-masing.*
 
 Hasil fisik *file* CSV di *hard drive* Anda akan berwujud seperti ini:
 
 **Isi `mcl_matrix_final_sparse.csv`:**
 ```csv
 Product_A,Product_B,Weight
-103,102,1.0
+103,101,1.0
+102,102,1.0
+103,103,1.0
 ```
 
 **Isi `mcl_attributes_final_sparse.csv`:**
 ```csv
 Product_ID,Cluster_ID,Status_Titik
-102,103,Anggota
+101,103,Anggota
+102,102,Host
+103,103,Host
 ```
 
 ---
