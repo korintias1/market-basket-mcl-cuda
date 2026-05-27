@@ -699,3 +699,130 @@ Maka, saat tahap alokasi memori berjalan:
 * Bandingkan dengan Matriks C sebelum di-pruning yang memakan 3 kotak memori. Semakin besar graf Anda (misal jutaan koneksi), tahap *Compaction* ini akan menghemat bergiga-giga kapasitas VRAM di dalam GPU.
 
 Di akhir langkah ini, rumah memori yang baru dan efisien sudah berdiri di GPU. Namun, rumah tersebut masih kosong. Tahap selanjutnya adalah memindahkan secara fisik nilai-nilai yang selamat tersebut ke dalam struktur memori yang baru ini.
+
+### TAHAP 5B: Eksekusi Compaction (Pemindahan Data ke Memori Baru)
+
+Setelah lahan memori baru yang super hemat (`d_new_col_ptr`, `d_new_row_idx`, `d_new_val`) berhasil disewa oleh CPU dan batas-batas barunya sudah ditanamkan ke GPU, sekarang saatnya memindahkan barang-barang (koneksi) yang masih hidup dari rumah lama ke rumah baru.
+
+```cpp
+        // Eksekusi Pindah Data ke Matriks Ringkas
+        compact_sparse_kernel<<<blocks1D, threads1D>>>(N, d_C_col_ptr, d_C_row_idx, d_C_val, d_new_col_ptr, d_new_row_idx, d_new_val);
+        CHECK_CUDA(cudaDeviceSynchronize());
+```
+
+**Anatomi *Kernel* Pemadatan Data (`compact_sparse_kernel`):**
+Sama seperti *kernel* sebelumnya, pembagian kerja di sini menggunakan aturan **1 Thread mengeksekusi 1 Kolom**.
+
+```cpp
+__global__ void compact_sparse_kernel(int N, const int* old_col_ptr, const int* old_row_idx, const float* old_val, const int* new_col_ptr, int* new_row_idx, float* new_val) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < N) {
+        int old_start = old_col_ptr[col];
+        int old_end = old_col_ptr[col + 1];
+        
+        // Melihat letak posisi awal untuk menaruh data di rumah baru
+        int new_idx = new_col_ptr[col]; 
+        
+        // Mengecek satu per satu barang di rumah lama
+        for (int i = old_start; i < old_end; ++i) {
+            if (old_val[i] > 0.0f) { // Jika bukan sampah hasil pruning
+                new_val[new_idx] = old_val[i];
+                new_row_idx[new_idx] = old_row_idx[i];
+                new_idx++; // Geser posisi taruh agar data berikutnya tidak tertumpuk
+            }
+        }
+    }
+}
+```
+
+**Simulasi Eksekusi Pemindahan Memori per *Thread***
+Mari kita gunakan kondisi Matriks C kita yang penuh angka nol hasil *Pruning* sebelumnya:
+* **Rumah Lama:** `old_col_ptr` = `[0, 1, 3, 3]` | `old_val` = `[0.0, 0.0, 1.0]` | `old_row_idx` = `[0, 1, 2]`
+* **Rumah Baru (Kosong):** `new_col_ptr` = `[0, 0, 1, 1]` | `new_val` = `[ ]` (kapasitas 1) | `new_row_idx` = `[ ]` (kapasitas 1)
+
+Berikut adalah proses gotong royong para *Thread* GPU:
+
+| Pekerja GPU | 1. Membaca Batas Rumah Lama | 2. Membaca Posisi Taruh Baru (`new_idx`) | 3. Inspeksi dan Eksekusi Pemindahan Data |
+| :--- | :--- | :--- | :--- |
+| **Thread 0**<br>*(Target: Kolom 0)* | Indeks `0` sampai `1` | `new_col_ptr[0]` = **`0`** | Mengecek `old_val[0]` (`0.0`). Karena ini sampah hasil *pruning*, dibiarkan saja. Tugas selesai. |
+| **Thread 1**<br>*(Target: Kolom 1)* | Indeks `1` sampai `3` | `new_col_ptr[1]` = **`0`** | • Cek `old_val[1]` (`0.0`). Diabaikan.<br>• Cek `old_val[2]` (`1.0`). Selamat!<br>➔ Disalin ke rumah baru: `new_val[0]` diisi **`1.0`**.<br>➔ Baris disalin: `new_row_idx[0]` diisi **`2`**.<br>➔ `new_idx` bergeser menjadi `1`. Tugas selesai. |
+| **Thread 2**<br>*(Target: Kolom 2)* | Indeks `3` sampai `3` | `new_col_ptr[2]` = **`1`** | Karena batas indeks awal dan akhir sama (`3`), artinya kolom ini kosong. Tugas selesai. |
+
+**Hasil Akhir di Memori VRAM:**
+Kini rumah baru tersebut telah terisi dengan sangat padat dan efisien tanpa ada celah angka `0.0`.
+`new_val` kini berisi `[1.0]` dan `new_row_idx` berisi `[2]`. Matriks ini kini siap digunakan untuk iterasi Ekspansi berikutnya!
+
+---
+
+### TAHAP 6: Pengecekan Konvergensi (Global Chaos)
+
+Setelah graf diotak-atik, CPU bertugas mengecek apakah susunan klaster antar-produk sudah stabil (konvergen) atau masih butuh perulangan (*iterasi*).
+
+```cpp
+        // Cek Global Chaos
+        CHECK_CUDA(cudaMemcpy(h_chaos.data(), d_chaos, N * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        float global_chaos = 0.0f;
+        for (int i = 0; i < N; i++) {
+            if (h_chaos[i] > global_chaos) global_chaos = h_chaos[i];
+        }
+        cout << "Iterasi " << iter + 1 << " | NNZ Aktif: " << new_nnz << " | Global Chaos: " << global_chaos << endl;
+```
+1.  **Tarik Laporan:** CPU menyuruh GPU mengirimkan buku catatan *Chaos* per kolom (`d_chaos`) ke memori komputer utama (`h_chaos`). Berdasarkan simulasi kita di Tahap 4, array ini berisi `[0.0, 0.0, 0.0]`.
+2.  **Cari Nilai Maksimal:** CPU melakukan perulangan standar (`for`) untuk mencari nilai yang paling besar di dalam array tersebut. Nilai terbesar inilah yang dinobatkan sebagai **`global_chaos`**. Pada simulasi kita, nilai tertingginya adalah `0.0`.
+3.  **Cetak Progres:** CPU mencetak status terkini ke layar monitor agar Anda bisa memantau pergerakan algoritma (*"Iterasi 1 | NNZ Aktif: 1 | Global Chaos: 0"*).
+
+---
+
+### TAHAP 7: Pembersihan Memori & Pergantian Siklus (Cleanup & Handover)
+
+Ini adalah tahap perputaran roda iterasi. Kita harus menghancurkan sisa-sisa perhitungan lama untuk mencegah kebocoran memori (*Memory Leak*), lalu menjadikan matriks baru yang ringkas sebagai matriks utama.
+
+```cpp
+        // Bersihkan memori fisik lama
+        cudaFree(d_col_ptr); cudaFree(d_row_idx); cudaFree(d_val);
+        cudaFree(d_C_col_ptr); cudaFree(d_C_row_idx); cudaFree(d_C_val);
+        cudaFree(dBuffer1); cudaFree(dBuffer2);
+        
+        // Bersihkan surat-surat administrasi (Descriptor)
+        cusparseDestroySpMat(matA); cusparseDestroySpMat(matC);
+        cusparseSpGEMM_destroyDescr(spgemmDesc);
+        
+        // Serah terima penunjukan memori (The Handover)
+        d_col_ptr = d_new_col_ptr; 
+        d_row_idx = d_new_row_idx; 
+        d_val = d_new_val; 
+        nnz = new_nnz;
+
+        // Cek Syarat Keluar dari Siklus (The Escape Hatch)
+        if (global_chaos < convergence_threshold) {
+            cout << "\n>> KONVERGENSI TERCAPAI pada Iterasi ke-" << iter + 1 << "!" << endl;
+            break;
+        }
+    } // Akhir dari bracket perulangan (while/for loop iterasi)
+```
+
+**Logika di Balik Pergantian Siklus:**
+1.  **Penghancuran (Bulldozer `cudaFree`):** Array `d_col_ptr` (Matriks A awal yang lama) dan `d_C_col_ptr` (Matriks C hasil ekspansi yang boros) dihancurkan total bangunan dan memorinya dari VRAM. Kertas coretan mesin cuSPARSE (`dBuffer`) juga dibuang.
+2.  **Tukar Papan Nama (Handover Pointer):** Setelah bangunan lama dihancurkan, papan penunjuk jalan `d_col_ptr`, `d_row_idx`, dan `d_val` otomatis menjadi pengangguran. CPU lalu mengambil papan penunjuk jalan tersebut dan **menancapkannya tepat di depan lahan memori bangunan baru** milik `d_new_...` yang sudah padat tadi.
+3.  **Siklus Berputar:** Berkat pertukaran nama ini, ketika program berputar kembali ke Tahap 1, mesin GPU secara otomatis akan menggunakan bangunan yang baru ini sebagai dasar Matriks A tanpa perlu melakukan alokasi (`cudaMalloc`) ulang.
+4.  **Syarat Berhenti:** Jika `global_chaos` sudah menyentuh batas bawah toleransi (mendekati 0), berarti klaster sudah paten. Perintah `break` dieksekusi untuk memutus rantai perulangan (loop) secara paksa, mengakhiri siklus MCL.
+
+---
+
+### TAHAP 8: Pencatatan Waktu (Sinkronisasi Asinkron)
+
+Setelah algoritma MCL berhasil keluar dari perulangan, program akan mematikan *stopwatch* untuk mengukur performa.
+
+```cpp
+    cudaEventRecord(stop); 
+    cudaEventSynchronize(stop);
+    
+    float milliseconds = 0; 
+    cudaEventElapsedTime(&milliseconds, start, stop);
+```
+
+Arsitektur sistem CUDA berjalan secara **Asinkron**, yang berarti komputer pusat (CPU) dan kartu grafis (GPU) berjalan sendiri-sendiri dengan kecepatan yang berbeda. Oleh karena itu, mematikan *stopwatch* butuh mekanisme khusus:
+1.  **`cudaEventRecord(stop)`:** Ini adalah instruksi mutlak. CPU memerintahkan GPU untuk mencatat waktu persis sesaat setelah GPU menuntaskan tugas terakhirnya.
+2.  **`cudaEventSynchronize(stop)`:** Ini adalah "Ruang Tunggu". Karena CPU berlari jauh lebih cepat membaca teks kodingan daripada GPU menghitung matematika, baris ini **memaksa CPU untuk diam dan menunggu** sampai GPU benar-benar selesai bekerja dan melapor. Tanpa baris ini, CPU akan nekat mencoba menghitung selisih waktu saat GPU masih sibuk bekerja, yang berujung pada eror komputasi.
+3.  **`cudaEventElapsedTime`:** Setelah GPU melapor selesai (sinkronisasi berhasil), barulah CPU diizinkan menghitung selisih matematis antara garis `start` di awal program dengan garis `stop` ini, menghasilkan total waktu eksekusi dalam wujud milidetik (`milliseconds`).
